@@ -1,0 +1,25 @@
+from typing import Any
+
+from app.api.models.email import Email
+from app.api.repo.base import BaseRepository
+from app.api.schemas.email import EmailBase
+
+
+class EmailRepository(BaseRepository[EmailBase, Email]):
+    model = Email
+
+    def _entity_to_model(self, entity: EmailBase) -> Email:
+        return Email(**entity.model_dump())
+
+    def _get_filters(self, **filters) -> list[Any]:
+        filter_conditions = []
+
+        if "id" in filters:
+            filter_conditions.append(self.model.id == filters["id"])
+        return filter_conditions
+
+    def _get_sort_fields(self, sort):
+        return super()._get_sort_fields(sort)
+
+    def _parse_cursor_value(self, val):
+        return super()._parse_cursor_value(val)

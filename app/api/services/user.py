@@ -1,0 +1,130 @@
+from uuid import UUID
+
+import sentry_sdk
+import sentry_sdk.logger as sentry_logger
+
+from app.api.models.user import User
+from app.api.repo.redis import RedisRepository
+from app.api.repo.user import UserRepository
+from app.api.schemas.user import UserInDB
+from app.core.config import get_settings
+from app.core.exceptions import ServerError, UserNotFoundError
+from app.serializers import _deserialize_cached_user, _serialize_user
+
+SETTINGS = get_settings()
+
+
+class UserService:
+    def __init__(self, user_repo: UserRepository, redis_repo: RedisRepository):
+        self._user_repo = user_repo
+        self._redis_repo = redis_repo
+
+    @staticmethod
+    def _user_cache_key(user_id: UUID) -> str:
+        return f"cache:user:{user_id!s}"
+
+    async def get_user(self, **filters) -> User:
+        try:
+            user: User | None = await self._user_repo.get_record(**filters)
+
+            if not user:
+                sentry_logger.warning(
+                    "User not found with id {user_id}", user_id=filters.get("id")
+                )
+                raise UserNotFoundError(user_id=filters.get("id"))
+
+            return user
+        except Exception as exc:
+            if isinstance(exc, UserNotFoundError):
+                raise UserNotFoundError(user_id=filters.get("id")) from exc
+
+            sentry_sdk.capture_exception(exc)
+            sentry_logger.error(
+                "Error occurred while retrieving user {user_id}",
+                user_id=filters.get("id"),
+            )
+            raise ServerError() from exc
+
+    async def _get_user(self, **filters) -> User | None:
+        return await self._user_repo.get_record(**filters)
+
+    async def create_user(
+        self, user: UserInDB, email: str, commit: bool = False
+    ) -> User:
+        try:
+            user_db: User = self._user_repo.add(entity=user)
+
+            if commit:
+                await self._user_repo.commit()
+                await self._user_repo.refresh(user_db)
+            else:
+                await self._user_repo.flush()
+                await self._user_repo.refresh(user_db)
+
+            return user_db
+        except Exception as exc:
+            if commit:
+                await self._user_repo.rollback()
+
+            sentry_sdk.capture_exception(exc)
+            sentry_logger.error("Error occurred while creating user")
+            raise ServerError() from exc
+
+    async def get_cached_user(self, **filters) -> User | None:
+        cache_key: str = self._user_cache_key(filters.get("id"))
+        cached: dict = await self._redis_repo.get_hset(cache_key)
+
+        if cached:
+            cached_user = _deserialize_cached_user(cached)
+
+            if not cached_user.is_verified:
+                sentry_logger.info(
+                    "Cached user not found with id {user_id}", user_id=filters.get("id")
+                )
+                raise UserNotFoundError(user_id=filters.get("id"))
+
+            return cached_user
+
+    async def cache_user(self, user: User):
+        value: dict = _serialize_user(user)
+
+        await self._redis_repo.create_hset(self._user_cache_key(user.id), value)
+
+    async def invalidate_user_cache(self, user: User):
+        await self._redis_repo.delete_key(self._user_cache_key(user.id))
+
+    async def update_user(self, user: User, commit: bool = False) -> User:
+        try:
+            user = self._user_repo.add(model=user)
+
+            if commit:
+                await self._user_repo.commit()
+                await self._user_repo.refresh(user)
+            else:
+                await self._user_repo.flush()
+                await self._user_repo.refresh(user)
+
+            await self.cache_user(user)
+            return user
+        except Exception as exc:
+            if commit:
+                await self._user_repo.rollback()
+
+            sentry_sdk.capture_exception(exc)
+            sentry_logger.error(
+                "Error occurred while updating user {user_id}", user_id=user.id
+            )
+            raise ServerError() from exc
+
+    async def delete_user(self, user: User):
+        try:
+            await self._user_repo.delete(user)
+            await self._user_repo.commit()
+            await self.invalidate_user_cache(user)
+        except Exception as exc:
+            await self._user_repo.rollback()
+            sentry_sdk.capture_exception(exc)
+            sentry_logger.error(
+                "Error occurred while deleting user {user_id}", user_id=user.id
+            )
+            raise ServerError() from exc

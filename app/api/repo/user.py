@@ -1,0 +1,59 @@
+from datetime import datetime
+from typing import Any
+
+from app.api.models.user import User
+from app.api.repo.base import BaseRepository
+from app.api.schemas.user import UserBase
+
+
+class UserRepository(BaseRepository[UserBase, User]):
+    model = User
+
+    SORT_FIELDS = ["created_at"]  # noqa: RUF012
+
+    @staticmethod
+    def _entity_to_model(entity: UserBase) -> model:
+        return User(**entity.model_dump())
+
+    def _get_filters(self, **filters) -> list[Any]:
+        filter_conditions = []
+
+        if "id" in filters:
+            filter_conditions.append(self.model.id == filters["id"])
+        if "type" in filters:
+            filter_conditions.append(self.model.type == filters["type"])
+        if "email" in filters:
+            filter_conditions.append(self.model.email == filters["email"])
+        if "google_email" in filters:
+            filter_conditions.append(self.model.google_email == filters["google_email"])
+        if "is_active" in filters:
+            filter_conditions.append(self.model.is_active.is_(filters["is_active"]))
+        if "is_verified" in filters:
+            filter_conditions.append(self.model.is_verified.is_(filters["is_verified"]))
+
+        return filter_conditions
+
+    def _parse_cursor_value(self, val: Any) -> tuple[bool, Any]:
+        is_valid = False
+
+        if isinstance(val, str) and not is_valid:
+            try:
+                val = datetime.fromisoformat(val)
+                is_valid = True
+            except ValueError, TypeError:
+                pass
+
+        return is_valid, val
+
+    def _get_sort_fields(self, sort: str) -> tuple[list[str], Any, str]:
+        sortable_fields: dict = {"created_at": self.model.created_at}
+
+        column = sortable_fields.get(sort)
+
+        if not column:
+            sort_field = "created_at"
+            column = self.model.created_at
+        else:
+            sort_field = sort
+
+        return self.SORT_FIELDS, column, sort_field

@@ -1,0 +1,66 @@
+from datetime import UTC, datetime
+
+import psycopg2
+from celery.exceptions import Reject
+from resend.exceptions import ResendError
+
+from app.api.models.email import Email
+from app.api.models.enum import EmailStatus
+from app.core.config import get_settings
+from app.core.exceptions import MaxRetriesError
+from app.worker import BaseTaskWithFailure, celery_app
+lazy from app.worker import get_email_service
+
+SETTINGS = get_settings()
+SENDER_EMAIL = SETTINGS.API_EMAIL
+RESEND_API_KEY = SETTINGS.RESEND_API_KEY
+
+
+@celery_app.task(base=BaseTaskWithFailure, bind=True)
+def send_email(
+    self,
+    email_subject: str,
+    email_message: str,
+    recipient_email: str,
+):
+    try:
+        email_service = get_email_service()
+
+        email_service.api_key = RESEND_API_KEY
+        email_service.send(
+            SENDER_EMAIL, recipient_email, email_subject, email_message, self.request.id
+        )
+
+        email: Email | None = email_service.get_processed_email(self.request.id)
+
+        if email:
+            email.status = EmailStatus.DELIVERED
+            email.delivered_at = datetime.now(UTC)
+            email_service.update_processed_email(email)
+    except (
+        ResendError,
+        psycopg2.OperationalError,
+        psycopg2.InterfaceError,
+        psycopg2.extensions.TransactionRollbackError,
+    ) as exc:
+        """retry for transient errors"""
+        try:
+            if not isinstance(exc, ResendError):
+                raise self.retry(
+                    exc=MaxRetriesError(str(exc)), countdown=self._backoff_countdown()
+                )
+
+            if hasattr(exc, "code") and int(exc.code) >= 500:
+                raise self.retry(
+                    exc=MaxRetriesError(str(exc)),
+                    countdown=self._backoff_countdown(),
+                )
+            else:
+                self._handle_failure(self.request.kwargs)
+                raise Reject(exc, requeue=False)
+        except MaxRetriesError as exc:
+            self._handle_failure(self.request.kwargs)
+            raise Reject(exc, requeue=False)
+    except Exception as exc:  # noqa: BLE001
+        self._handle_failure(self.request.kwargs)
+        raise Reject(exc, requeue=False)

@@ -1,0 +1,27 @@
+import enum
+import uuid
+from datetime import UTC, datetime
+
+from sqlalchemy import UUID, DateTime, Enum, PrimaryKeyConstraint, String
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.api.models.base import Base
+from app.api.models.enum import EmailStatus
+
+
+class Email(Base):
+    __tablename__ = "emails"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID)
+    processed_email: Mapped[str] = mapped_column(String)
+    status: Mapped[enum.Enum] = mapped_column(
+        Enum(EmailStatus, values_callable=lambda e: [m.value for m in e]),
+        default=EmailStatus.PENDING,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (PrimaryKeyConstraint("id", name="emails_pk"),)

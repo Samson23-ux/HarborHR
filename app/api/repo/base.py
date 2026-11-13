@@ -1,0 +1,297 @@
+import base64
+import json
+from abc import ABC, abstractmethod
+from binascii import Error as binascii_error
+from collections.abc import Sequence
+from datetime import datetime
+from typing import Any, Generic, TypeVar
+from uuid import UUID
+
+from pydantic import BaseModel
+from sqlalchemy import asc, desc, select, tuple_, update
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session
+
+from app.api.models.base import Base
+
+Entity = TypeVar("Entity", bound=BaseModel)
+SqlAlchemyModel = TypeVar("SqlAlchemyModel", bound=Base)
+
+
+class BaseRepository(ABC, Generic[Entity, SqlAlchemyModel]):
+    def __init__(
+        self,
+        async_session: AsyncSession | None = None,
+        sync_session: Session | None = None,
+    ):
+        self._sync_session = sync_session
+        self._async_session = async_session
+
+    model: type[SqlAlchemyModel]
+
+    # Narrow Session | None to Session: fail loudly on a misconfigured repo
+    # instead of an opaque "'NoneType' has no attribute" deep in a query.
+    @property
+    def async_session(self) -> AsyncSession:
+        if self._async_session is None:
+            raise RuntimeError(
+                f"{type(self).__name__} has no async session; "
+                "construct it with async_session= or assign one before use"
+            )
+        return self._async_session
+
+    @async_session.setter
+    def async_session(self, session: AsyncSession | None):
+        self._async_session = session
+
+    @property
+    def sync_session(self) -> Session:
+        if self._sync_session is None:
+            raise RuntimeError(
+                f"{type(self).__name__} has no sync session; "
+                "construct it with sync_session= or assign one before use"
+            )
+        return self._sync_session
+
+    @sync_session.setter
+    def sync_session(self, session: Session | None):
+        self._sync_session = session
+
+    def add(
+        self, entity: Entity | None = None, model: SqlAlchemyModel | None = None
+    ) -> SqlAlchemyModel:
+        if not model:
+            model = self._entity_to_model(entity)
+        self.async_session.add(model)
+        return model
+
+    async def flush(self):
+        await self.async_session.flush()
+
+    async def refresh(self, model: SqlAlchemyModel):
+        await self.async_session.refresh(model)
+
+    async def commit(self):
+        await self.async_session.commit()
+
+    async def rollback(self):
+        await self.async_session.rollback()
+
+    async def aclose(self):
+        await self.async_session.aclose()
+
+    async def delete(self, model: SqlAlchemyModel):
+        await self.async_session.delete(model)
+
+    async def encode_cursor(self, payload: dict) -> str:
+        payload_string: str = json.dumps(payload)
+        return base64.urlsafe_b64encode(payload_string.encode(), padded=False).decode()
+
+    async def decode_cursor(
+        self,
+        cursor_string: str,
+        curr_sort_field: str,
+        curr_order: str,
+        sort_fields: list[str],
+    ) -> dict | None:
+        try:
+            if not cursor_string:
+                return
+
+            cursor_string = base64.urlsafe_b64decode(cursor_string, padded=False)
+            cursor_payload = json.loads(cursor_string)
+
+            if (
+                curr_sort_field != cursor_payload["sort_field"]
+                or cursor_payload["sort_field"] not in sort_fields
+            ):
+                return
+
+            is_sort_value_valid, sort_value = self._parse_cursor_value(
+                cursor_payload["sort_value"]
+            )
+
+            if not is_sort_value_valid:
+                return
+            else:
+                cursor_payload["sort_value"] = sort_value
+
+            try:
+                cursor_payload["last_id"] = UUID(cursor_payload["last_id"])
+            except ValueError, AttributeError:
+                return
+
+            if cursor_payload["order"] != curr_order:
+                return
+
+            return cursor_payload
+        except (
+            KeyError,
+            TypeError,
+            AttributeError,
+            binascii_error,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+        ):
+            return
+
+    async def get_records(
+        self,
+        limit: int,
+        sort: str | None = None,
+        cursor: str | None = None,
+        **filters,
+    ) -> dict:
+        """sort is a field name, prefixed with "-" for descending (e.g. "-created_at")"""
+        order, sort = self._parse_sort(sort)
+
+        filter_conditions: list[Any] = self._get_filters(**filters)
+        sort_fields, sort_column, sort_field = self._get_sort_fields(sort)
+
+        cursor_payload: dict = await self.decode_cursor(
+            cursor, sort_field, order, sort_fields
+        )
+
+        order_by_columns = []
+
+        if not cursor_payload:
+            """get records from the first record in db"""
+
+            if order == "desc":
+                order_by_columns.append(desc(sort_column))
+                order_by_columns.append(desc(self.model.id))
+            else:
+                order_by_columns.append(asc(sort_column))
+                order_by_columns.append(asc(self.model.id))
+
+            stmt = (
+                select(self.model)
+                .where(*filter_conditions)
+                .order_by(*order_by_columns)
+                .limit(limit + 1)
+            )
+        else:
+            """continue with the last record viewed"""
+
+            cursor_last_id = cursor_payload["last_id"]
+            cursor_sort_field = cursor_payload["sort_field"]
+            cursor_sort_value = cursor_payload["sort_value"]
+
+            column_tuple = tuple_(getattr(self.model, cursor_sort_field), self.model.id)
+
+            if cursor_payload["order"] == "desc":
+                order_by_columns.append(desc(sort_column))
+                order_by_columns.append(desc(self.model.id))
+
+                page_filter = column_tuple < tuple_(cursor_sort_value, cursor_last_id)
+            else:
+                order_by_columns.append(asc(sort_column))
+                order_by_columns.append(asc(self.model.id))
+
+                page_filter = column_tuple > tuple_(cursor_sort_value, cursor_last_id)
+
+            stmt = (
+                select(self.model)
+                .where(*filter_conditions, page_filter)
+                .order_by(*order_by_columns)
+                .limit(limit + 1)
+            )
+
+        res = await self.async_session.execute(stmt)
+        records = res.scalars().all()
+
+        has_more: bool = len(records) > limit
+
+        next_cursor = None
+        if records:
+            sort_value = getattr(records[:limit][-1], sort_field)
+
+            if isinstance(sort_value, datetime):
+                sort_value = sort_value.isoformat()
+
+            payload: dict = {
+                "sort_field": sort_field,
+                "sort_value": sort_value,
+                "last_id": str(records[:limit][-1].id),
+                "order": order,
+            }
+            next_cursor: str = await self.encode_cursor(payload)
+
+        return {"data": records[:limit], "cursor": next_cursor if has_more else None}
+
+    async def get_record(self, **filters) -> SqlAlchemyModel | None:
+        filter_conditions: list[Any] = self._get_filters(**filters)
+
+        res = await self.async_session.execute(
+            select(self.model).where(*filter_conditions)
+        )
+        return res.scalar()
+
+    async def update_records(self, fields_to_update: dict[str, Any], **filters):
+        filter_conditions: list[Any] = self._get_filters(**filters)
+        await self.async_session.execute(
+            update(self.model).values(fields_to_update).where(*filter_conditions)
+        )
+
+    @staticmethod
+    def _parse_sort(sort: str | None) -> tuple[str, str | None]:
+        """splits "-field" into ("desc", "field") and "field" into ("asc", "field")"""
+        if sort and sort.startswith("-"):
+            return "desc", sort[1:]
+        return "asc", sort
+
+    @abstractmethod
+    def _entity_to_model(self, entity: Entity) -> SqlAlchemyModel:
+        raise NotImplementedError("Subclasses must implement _entity_to_model method")
+
+    @abstractmethod
+    def _get_filters(self, **filters) -> list[Any]:
+        return []
+
+    @abstractmethod
+    def _get_sort_fields(self, sort: str) -> tuple[list[str], Any, str]:
+        """returns all allowed sort fields, the column chosen for a sort value and the column name"""
+        return [""], "", ""
+
+    @abstractmethod
+    def _parse_cursor_value(self, val: Any) -> tuple[bool, Any]:
+        return False, ""
+
+    # sync db queries
+    def get_sync_records(self, **filters) -> Sequence[SqlAlchemyModel]:
+        filter_conditions: list[Any] = self._get_filters(**filters)
+
+        res = self.sync_session.execute(select(self.model).where(*filter_conditions))
+        return res.scalars().all()
+
+    def get_sync_record(self, **filters) -> SqlAlchemyModel | None:
+        filter_conditions: list[Any] = self._get_filters(**filters)
+
+        res = self.sync_session.execute(select(self.model).where(*filter_conditions))
+        return res.scalar()
+
+    def sync_add(
+        self, entity: Entity | None = None, model: SqlAlchemyModel | None = None
+    ) -> SqlAlchemyModel:
+        if not model:
+            model = self._entity_to_model(entity)
+        self.sync_session.add(model)
+        return model
+
+    def sync_flush(self):
+        self.sync_session.flush()
+
+    def sync_refresh(self, model: SqlAlchemyModel):
+        self.sync_session.refresh(model)
+
+    def sync_commit(self):
+        self.sync_session.commit()
+
+    def sync_rollback(self):
+        self.sync_session.rollback()
+
+    def sync_delete(self, model: SqlAlchemyModel):
+        self.sync_session.delete(model)
+
+    def close(self):
+        self.sync_session.close()

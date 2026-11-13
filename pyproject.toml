@@ -1,0 +1,42 @@
+[project]
+name = "harborhr"
+version = "0.1.0"
+description = "A payroll engine built for Nigerian SMEs"
+readme = "README.md"
+requires-python = ">=3.15"
+dependencies = [
+    "alembic",
+    "asyncpg",
+    "authlib",
+    "celery",
+    "fastapi[all]",
+    "fastapi-limiter",
+    "gevent",
+    "joserfc",
+    "psycopg",
+    "psycopg2",
+    "pwdlib[argon2]",
+    "pydantic-settings",
+    "pyrate-limiter",
+    "redis",
+    "resend",
+    "sentry-sdk",
+    "sqlalchemy",
+]
+
+[dependency-groups]
+dev = [
+    "asgi-lifespan",
+    "pytest",
+    "pytest-asyncio",
+]
+
+[tool.uv]
+exclude-dependencies = ["pyyaml"]
+
+[tool.pytest.ini_options]
+asyncio_default_fixture_loop_scope= "session"
+asyncio_default_test_loop_scope= "session"
+markers = [
+    "rate_limited: run the test with the real rate limiters enabled",
+]

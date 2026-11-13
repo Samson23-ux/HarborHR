@@ -1,0 +1,513 @@
+from uuid import UUID, uuid4, uuid7
+
+import sentry_sdk
+import sentry_sdk.logger as sentry_logger
+
+from app.api.models.enum import UserType
+from app.api.models.user import User
+from app.api.repo.email import EmailRepository
+from app.api.repo.redis import RedisRepository
+from app.api.repo.uow import UnitOfWorkRepository
+from app.api.repo.user import UserRepository
+from app.api.schemas.auth import (
+    EmailLogin,
+    EmailVerify,
+    ResendOtp,
+    TokenData,
+)
+from app.api.schemas.email import EmailInDB
+from app.api.schemas.user import (
+    EmailUserResponse,
+    GoogleUserResponse,
+    UserInDB,
+)
+from app.api.services.email import EmailService
+from app.api.services.otp import OtpService
+from app.api.services.user import UserService
+from app.core.config import get_settings
+from app.core.exceptions import (
+    AuthenticationError,
+    CredentialError,
+    ErrorCode,
+    InvalidOtpError,
+    ServerError,
+    TokenExpiredError,
+    UserExistsError,
+)
+from app.core.security import Security
+from app.email_texts import verification_message
+from app.worker.tasks.email import send_email
+
+SETTINGS = get_settings()
+
+
+def _session_key(user_id: UUID) -> str:
+    return f"sessions:{user_id!s}"
+
+
+def _refresh_expire() -> int:
+    return SETTINGS.REFRESH_TOKEN_EXPIRE_TIME * 24 * 3600
+
+
+class AuthService:
+    def __init__(self, redis_repo: RedisRepository):
+        self._uow: UnitOfWorkRepository | None = None
+        self._user_service: UserService | None = None
+        self._redis_repo = redis_repo
+
+    # SETTINGS = get_settings()
+
+    async def _setup_uow(self, uow: UnitOfWorkRepository):
+        self._uow = uow
+
+    async def _uow_user_otp_email(self, uow: UnitOfWorkRepository):
+        await self._setup_uow(uow)
+
+        user_repo = self._uow.repo(UserRepository)
+        email_repo = self._uow.repo(EmailRepository)
+
+        self._user_service = UserService(
+            user_repo=user_repo, redis_repo=self._redis_repo
+        )
+        self._email_service = EmailService(email_repo=email_repo)
+
+    async def _get_tokens(self, user_id: UUID, security: Security):
+        token_data: TokenData = TokenData(user_id=user_id, session_id=uuid4())
+        access_token, refresh_token_payload = await security.prepare_tokens(token_data)
+
+        try:
+            await self._redis_repo.create_hset(
+                _session_key(user_id),
+                {
+                    str(token_data.session_id): refresh_token_payload.get(
+                        "refresh_token_id"
+                    )
+                },
+                _refresh_expire(),
+            )
+
+            sentry_logger.info(
+                "Access and refresh tokens created for user {user_id}",
+                user_id=user_id,
+            )
+
+            return access_token, refresh_token_payload.get("refresh_token")
+        except Exception as exc:
+            sentry_sdk.capture_exception(exc)
+            sentry_logger.error("Error occurred while saving refresh token to redis")
+            raise ServerError() from exc
+
+    async def _revoke_session(self, refresh_token: str, security: Security):
+        try:
+            claims = await security.decode_token(
+                refresh_token, SETTINGS.REFRESH_TOKEN_SECRET_KEY, "refresh"
+            )
+
+            if not claims:
+                sentry_logger.warning(
+                    "Invalid refresh token received while revoking session"
+                )
+                raise AuthenticationError(
+                    code=ErrorCode.REFRESH_TOKEN_INVALID,
+                    details={"reason": "Invalid Refresh Token"},
+                )
+
+            await self._redis_repo.delete_session(
+                _session_key(claims.get("sub")), claims.get("sid")
+            )
+        except TokenExpiredError as exc:
+            sentry_logger.warning("Refresh token expired while revoking session")
+            raise AuthenticationError(
+                code=ErrorCode.REFRESH_TOKEN_EXPIRED,
+                details={"reason": "Refresh Token Expired"},
+            ) from exc
+        except Exception as exc:
+            sentry_sdk.capture_exception(exc)
+            sentry_logger.error(
+                "Error occurred while revoking user {user_id} session",
+                user_id=claims.get("sub"),
+            )
+            raise ServerError() from exc
+
+    async def _revoke_all_sessions(self, refresh_token: str, security: Security):
+        try:
+            claims = await security.decode_token(
+                refresh_token, SETTINGS.REFRESH_TOKEN_SECRET_KEY, "refresh"
+            )
+
+            if not claims:
+                sentry_logger.warning(
+                    "Invalid refresh token received while revoking all sessions"
+                )
+                raise AuthenticationError(
+                    code=ErrorCode.REFRESH_TOKEN_INVALID,
+                    details={"reason": "Invalid Refresh Token"},
+                )
+
+            await self._redis_repo.delete_key(_session_key(claims.get("sub")))
+        except TokenExpiredError as exc:
+            sentry_logger.warning("Refresh token expired while revoking all sessions")
+            raise AuthenticationError(
+                code=ErrorCode.REFRESH_TOKEN_EXPIRED,
+                details={"reason": "Refresh Token Expired"},
+            ) from exc
+        except Exception as exc:
+            sentry_sdk.capture_exception(exc)
+            sentry_logger.error(
+                "Error occurred while revoking all user {user_id} sessions",
+                user_id=claims.get("sub"),
+            )
+            raise ServerError() from exc
+
+    async def _send_email(
+        self,
+        otp_service: OtpService,
+        email_subject: str,
+        recipient_email: str,
+        user_id: UUID,
+    ):
+        email_db: EmailInDB = EmailInDB(id=uuid7(), processed_email=recipient_email)
+        await self._email_service.create_email(email_db)
+
+        send_email.apply_async(
+            priority=3,
+            kwargs={
+                "email_subject": email_subject,
+                "email_message": verification_message(
+                    await otp_service.create_otp(user_id)
+                ),
+                "recipient_email": recipient_email,
+            },
+        )
+
+    async def sign_up_with_email(
+        self,
+        email_login: EmailLogin,
+        otp_service: OtpService,
+        security: Security,
+        uow: UnitOfWorkRepository,
+    ):
+        await self._uow_user_otp_email(uow)
+
+        try:
+            existing_user: User | None = await self._user_service._get_user(
+                email=email_login.email
+            )
+
+            if existing_user and existing_user.is_verified:
+                sentry_logger.warning(
+                    "User {user_id} exists with the email provided for sign-up",
+                    user_id=existing_user.id,
+                )
+                raise UserExistsError(user_email=email_login.email)
+        except UserExistsError:
+            raise
+        except Exception as exc:
+            sentry_sdk.capture_exception(exc)
+            sentry_logger.error(
+                "Error occurred while retrieving existing user for email sign-up"
+            )
+            raise ServerError() from exc
+
+        try:
+            hashed_password: str = await security.hash_password(email_login.password)
+
+            if existing_user:
+                existing_user.hashed_password = hashed_password
+                await self._user_service.update_user(existing_user)
+            else:
+                user = UserInDB(
+                    id=uuid7(),
+                    type=UserType.EMAIL,
+                    email=email_login.email,
+                    hashed_password=hashed_password,
+                )
+                await self._user_service.create_user(user, email_login.email)
+
+            user_id = existing_user.id if existing_user else user.id
+
+            await self._uow.commit()
+            await self._send_email(
+                otp_service,
+                "Email Verification Code",
+                email_login.email,
+                user_id,
+            )
+
+            sentry_logger.info(
+                "Email and password sign-up completed for user {user_id}",
+                user_id=user_id,
+            )
+        except Exception as exc:
+            await self._uow.rollback()
+
+            sentry_sdk.capture_exception(exc)
+            sentry_logger.error(
+                "Error occurred while creating user",
+            )
+            raise ServerError() from exc
+
+    async def sign_up_with_google(
+        self, payload: dict, user_service: UserService, security: Security
+    ) -> tuple[str, str]:
+        try:
+            user_info: dict = payload.get("userinfo")
+
+            google_id: str = user_info.get("sub")
+            user_email: str = user_info.get("email")
+
+            existing_user: User | None = await user_service._get_user(
+                google_email=user_email,
+                is_verified=True,
+            )
+
+            if existing_user:
+                existing_user.is_active = True
+                await user_service.update_user(existing_user, commit=True)
+            else:
+                user = UserInDB(
+                    id=uuid7(),
+                    type=UserType.GOOGLE,
+                    is_active=True,
+                    is_verified=True,
+                    google_id=google_id,
+                    google_email=user_email,
+                )
+                await user_service.create_user(user, user_email, commit=True)
+
+            user_id = existing_user.id if existing_user else user.id
+            access_token, refresh_token = await self._get_tokens(user_id, security)
+
+            sentry_logger.info(
+                "Google sign-in completed for user {user_id}",
+                user_id=user_id,
+            )
+
+            return access_token, refresh_token
+        except Exception as exc:
+            sentry_sdk.capture_exception(exc)
+            sentry_logger.error("Error occurred while signing in with google account")
+            raise ServerError() from exc
+
+    async def verify_account(
+        self,
+        otp_service: OtpService,
+        user_service: UserService,
+        email_verify: EmailVerify,
+    ):
+        existing_user: User | None = await user_service._get_user(
+            email=email_verify.email
+        )
+
+        if not existing_user:
+            sentry_logger.warning(
+                "User not found with email in an attempt to verify account"
+            )
+            raise InvalidOtpError()
+
+        await otp_service.verify_otp(existing_user.id, email_verify.otp_code)
+
+        try:
+            existing_user.is_verified = True
+            await user_service.update_user(existing_user, commit=True)
+
+            sentry_logger.info(
+                "User {user_id} account verification completed",
+                user_id=existing_user.id,
+            )
+        except Exception as exc:
+            sentry_sdk.capture_exception(exc)
+            sentry_logger.error(
+                "Error occurred while trying to verify user {user_id} account",
+                user_id=existing_user.id,
+            )
+            raise ServerError() from exc
+
+    async def resend_otp(
+        self,
+        otp_resend: ResendOtp,
+        otp_service: OtpService,
+        uow: UnitOfWorkRepository,
+    ):
+        await self._uow_user_otp_email(uow)
+
+        existing_user: User | None = await self._user_service._get_user(
+            email=otp_resend.email, is_verified=False
+        )
+
+        if not existing_user:
+            sentry_logger.warning("User not found for resend otp")
+            return
+
+        try:
+            await self._uow.commit()
+            await self._send_email(
+                otp_service,
+                "Email Verification Code",
+                otp_resend.email,
+                existing_user.id,
+            )
+
+            sentry_logger.info(
+                "OTP code resent to user {user_id}",
+                user_id=existing_user.id,
+            )
+        except Exception as exc:
+            await self._uow.rollback()
+
+            sentry_sdk.capture_exception(exc)
+            sentry_logger.error(
+                "Error occurred while resending otp to user {user_id}",
+                user_id=existing_user.id,
+            )
+            raise ServerError() from exc
+
+    async def login(
+        self, email_login: EmailLogin, user_service: UserService, security: Security
+    ):
+        user_email: str = email_login.email
+        existing_user: User | None = await user_service._get_user(
+            email=user_email, type=UserType.EMAIL, is_verified=True
+        )
+
+        if not existing_user:
+            sentry_logger.warning(
+                "Invalid credentials received from user in an attempt to login. User not found",
+            )
+            raise CredentialError()
+
+        if not await security.verify_password(
+            email_login.password, existing_user.hashed_password
+        ):
+            sentry_logger.warning(
+                "Invalid credentials received from user in an attempt to login. Wrong password",
+            )
+            raise CredentialError()
+
+        existing_user.is_active = True
+        await user_service.update_user(existing_user, commit=True)
+        access_token, refresh_token = await self._get_tokens(existing_user.id, security)
+
+        sentry_logger.info(
+            "Login completed for user {user_id}",
+            user_id=existing_user.id,
+        )
+
+        return access_token, refresh_token
+
+    async def create_auth_tokens(
+        self, refresh_token: str, user_service: UserService, security: Security
+    ):
+        try:
+            claims = await security.decode_token(
+                refresh_token, SETTINGS.REFRESH_TOKEN_SECRET_KEY, "refresh"
+            )
+
+            if not claims:
+                sentry_logger.warning(
+                    "Invalid refresh token received in an attempt to refresh tokens"
+                )
+                raise AuthenticationError(
+                    code=ErrorCode.REFRESH_TOKEN_INVALID,
+                    details={"reason": "Invalid Refresh Token"},
+                )
+        except TokenExpiredError as exc:
+            sentry_logger.warning("Refresh token expired for token refresh")
+            raise AuthenticationError(
+                code=ErrorCode.REFRESH_TOKEN_EXPIRED,
+                details={"reason": "Refresh Token Expired"},
+            ) from exc
+
+        user_id = claims.get("sub")
+
+        existing_user: User | None = await user_service._get_user(
+            id=user_id, is_verified=True
+        )
+
+        if not existing_user:
+            sentry_logger.warning(
+                "User {user_id} not found during refresh", user_id=user_id
+            )
+            raise AuthenticationError(
+                code=ErrorCode.REFRESH_TOKEN_INVALID,
+                details={"reason": "User not found"},
+            )
+
+        token_data: TokenData = TokenData(user_id=user_id, session_id=claims.get("sid"))
+        access_token, refresh_token_payload = await security.prepare_tokens(token_data)
+
+        try:
+            refresh_state = await self._redis_repo.rotate_refresh_token(
+                _session_key(user_id),
+                claims.get("sid"),
+                claims.get("jti"),
+                refresh_token_payload.get("refresh_token_id"),
+                _refresh_expire(),
+            )
+        except Exception as exc:
+            sentry_sdk.capture_exception(exc)
+            sentry_logger.error("Error occurred while rotating refresh token")
+            raise ServerError() from exc
+
+        if refresh_state == 0:
+            sentry_logger.warning(
+                "Refresh token for an ended session received for user {user_id}",
+                user_id=user_id,
+            )
+            raise AuthenticationError(
+                code=ErrorCode.REFRESH_TOKEN_INVALID,
+                details={"reason": "Invalid Refresh Token"},
+            )
+
+        if refresh_state == -1:
+            sentry_logger.error(
+                "Reused refresh token received for user {user_id}", user_id=user_id
+            )
+            raise AuthenticationError(
+                code=ErrorCode.REFRESH_TOKEN_REUSED,
+                details={"reason": "Refresh Token Used"},
+            )
+
+        sentry_logger.info(
+            "Access and refresh tokens created for user {user_id}",
+            user_id=user_id,
+        )
+
+        return access_token, refresh_token_payload.get("refresh_token")
+
+    async def get_current_user(
+        self, curr_user: User
+    ) -> EmailUserResponse | GoogleUserResponse:
+        sentry_logger.info("User {user_id} account retrieved", user_id=curr_user.id)
+        if curr_user.type == "email":
+            return EmailUserResponse.model_validate(curr_user)
+        else:
+            return GoogleUserResponse.model_validate(curr_user)
+
+    async def logout(
+        self,
+        curr_user: User,
+        refresh_token: str,
+        security: Security,
+        user_service: UserService,
+    ):
+        curr_user.is_active = False
+        await user_service.update_user(curr_user, commit=True)
+
+        await self._revoke_session(refresh_token, security)
+
+        sentry_logger.info(
+            "User {user_id} account logout completed", user_id=curr_user.id
+        )
+
+    async def delete_account(
+        self,
+        curr_user: User,
+        user_service: UserService,
+        refresh_token: str,
+        security: Security,
+    ):
+        await user_service.delete_user(curr_user)
+        await self._revoke_all_sessions(refresh_token, security)
+
+        sentry_logger.info("User {user_id} account deleted", user_id=curr_user.id)

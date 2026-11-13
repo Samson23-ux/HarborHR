@@ -1,0 +1,143 @@
+from datetime import UTC, datetime, timedelta
+from uuid import uuid4
+
+from authlib.integrations.starlette_client import OAuth
+from joserfc import jwt
+from joserfc.errors import (
+    ExpiredTokenError,
+    JoseError,
+)
+from joserfc.jwk import OctKey
+from pwdlib.hashers.argon2 import Argon2Hasher
+
+from app.api.schemas.auth import TokenData
+from app.api.services.threads import Thread
+from app.core.config import get_settings
+from app.core.exceptions import TokenExpiredError
+
+
+class Security:
+    OAUTH: OAuth = OAuth()
+    SETTINGS = get_settings()
+
+    def __init__(self):
+        self.thread = Thread()
+        self.oauth: OAuth = self.OAUTH
+        self.arg2_hasher = Argon2Hasher()
+
+    def _get_registry(self, token_type: str) -> jwt.JWTClaimsRegistry:
+        return jwt.JWTClaimsRegistry(
+            exp={"essential": True},
+            sub={"essential": True},
+            sid={"essential": True},
+            typ={"essential": True, "value": token_type},
+            iss={"essential": True, "value": self.SETTINGS.JWT_TOKEN_ISS},
+        )
+
+    async def validate_registry(self, token_type, claims):
+        await self.thread.register(self._get_registry(token_type).validate, claims)
+
+    async def _encode(self, payload: dict, key: str) -> str:
+        return await self.thread.register(
+            jwt.encode,
+            {"alg": self.SETTINGS.JWT_ALGORITHM},
+            payload,
+            OctKey.import_key(key),
+        )
+
+    async def register_oauth(self):
+        self.oauth.register(
+            name="google",
+            client_id=self.SETTINGS.GOOGLE_CLIENT_ID,
+            client_secret=self.SETTINGS.GOOGLE_CLIENT_SECRET,
+            server_metadata_url=self.SETTINGS.GOOGLE_OAUTH_URL,
+            client_kwargs={
+                "scope": "openid email",
+            },
+        )
+
+    async def hash_password(self, password: str) -> str:
+        password = password + self.SETTINGS.ARGON2_PASSWORD_PEPPER
+        return await self.thread.register(self.arg2_hasher.hash, password)
+
+    async def verify_password(self, password: str, hash_password: str) -> bool:
+        password = password + self.SETTINGS.ARGON2_PASSWORD_PEPPER
+        return await self.thread.register(
+            self.arg2_hasher.verify, password, hash_password
+        )
+
+    async def create_access_token(
+        self, token_data: TokenData, expire_time: int | None = None
+    ) -> str:
+        if not expire_time:
+            token_expire_time = datetime.now(UTC) + timedelta(
+                minutes=self.SETTINGS.ACCESS_TOKEN_EXPIRE_TIME
+            )
+        else:
+            token_expire_time = datetime.now(UTC) + timedelta(minutes=expire_time)
+
+        payload: dict = {
+            "iss": self.SETTINGS.JWT_TOKEN_ISS,
+            "sub": str(token_data.user_id),
+            "exp": token_expire_time,
+            "typ": "access",
+            "iat": datetime.now(UTC),
+            "sid": str(token_data.session_id),
+        }
+
+        return await self._encode(payload, self.SETTINGS.ACCESS_TOKEN_SECRET_KEY)
+
+    async def create_refresh_token(
+        self, token_data: TokenData, expire_time: int | None = None
+    ) -> tuple[str, str]:
+        if not expire_time:
+            token_expire_time = datetime.now(UTC) + timedelta(
+                days=self.SETTINGS.REFRESH_TOKEN_EXPIRE_TIME
+            )
+        else:
+            token_expire_time = datetime.now(UTC) + timedelta(days=expire_time)
+
+        payload: dict = {
+            "iss": self.SETTINGS.JWT_TOKEN_ISS,
+            "sub": str(token_data.user_id),
+            "exp": token_expire_time,
+            "typ": "refresh",
+            "iat": datetime.now(UTC),
+            "jti": str(uuid4()),
+            "sid": str(token_data.session_id),
+        }
+
+        return await self._encode(
+            payload, self.SETTINGS.REFRESH_TOKEN_SECRET_KEY
+        ), payload["jti"]
+
+    async def decode_token(self, token: str, key: str, token_type: str):
+        try:
+            if token is None:
+                return
+
+            decoded = await self.thread.register(
+                jwt.decode,
+                token,
+                OctKey.import_key(key),
+                algorithms=[self.SETTINGS.JWT_ALGORITHM],
+            )
+
+            await self.validate_registry(token_type, decoded.claims)
+            return decoded.claims
+        except ExpiredTokenError as exc:
+            raise TokenExpiredError() from exc
+        except JoseError:
+            return
+
+    async def prepare_tokens(self, token_data: TokenData):
+        access_token: str = await self.create_access_token(token_data)
+        refresh_token, refresh_token_id = await self.create_refresh_token(token_data)
+
+        refresh_token_payload: dict = {
+            "user_id": token_data.user_id,
+            "refresh_token": refresh_token,
+            "refresh_token_id": refresh_token_id,
+        }
+
+        return access_token, refresh_token_payload
