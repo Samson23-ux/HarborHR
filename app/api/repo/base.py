@@ -4,11 +4,11 @@ from abc import ABC, abstractmethod
 from binascii import Error as binascii_error
 from collections.abc import Sequence
 from datetime import datetime
-from typing import Any, Generic, TypeVar
+from typing import Any, TypeVar
 from uuid import UUID
 
 from pydantic import BaseModel
-from sqlalchemy import asc, desc, select, tuple_, update
+from sqlalchemy import asc, desc, select, text, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
@@ -18,7 +18,7 @@ Entity = TypeVar("Entity", bound=BaseModel)
 SqlAlchemyModel = TypeVar("SqlAlchemyModel", bound=Base)
 
 
-class BaseRepository(ABC, Generic[Entity, SqlAlchemyModel]):
+class BaseRepository[Entity: BaseModel, SqlAlchemyModel: Base](ABC):
     def __init__(
         self,
         async_session: AsyncSession | None = None,
@@ -56,6 +56,18 @@ class BaseRepository(ABC, Generic[Entity, SqlAlchemyModel]):
     @sync_session.setter
     def sync_session(self, session: Session | None):
         self._sync_session = session
+
+    async def set_org_id_async(self, org_id: UUID):
+        await self._async_session.execute(
+            text("SELECT set_config('app.current_org', :org, true)"),
+            {"org": str(org_id)},
+        )
+
+    def set_org_id_sync(self, org_id: UUID):
+        self._sync_session.execute(
+            text("SELECT set_config('app.current_org', :org, true)"),
+            {"org": str(org_id)},
+        )
 
     def add(
         self, entity: Entity | None = None, model: SqlAlchemyModel | None = None

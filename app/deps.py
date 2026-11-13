@@ -16,6 +16,7 @@ from app.api.services.email import EmailService
 from app.api.services.otp import OtpService
 from app.api.services.user import UserService
 from app.core.config import get_settings
+from app.core.enum import Role
 from app.core.exceptions import (
     AuthenticationError,
     AuthorizationError,
@@ -187,6 +188,19 @@ async def get_current_active_cached_user(cached_user: CachedCurrentUser):
 
 
 CurrentActiveCachedUser = Annotated[User, Depends(get_current_active_cached_user)]
+
+
+def require_roles(roles: list[Role]):
+    async def role_checker(active_user: CurrentActiveCachedUser):
+        if active_user.role not in roles:
+            raise AuthorizationError(code=ErrorCode.NOT_PERMITTED)
+        return active_user
+
+    return role_checker
+
+
+RequireRole = Annotated[User, Depends(require_roles)]
+
 
 # ------------------------ Limiter -------------------------------- #
 write_limiter = Depends(

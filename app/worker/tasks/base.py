@@ -6,7 +6,7 @@ import sentry_sdk
 import sentry_sdk.logger as sentry_logger
 
 from app.api.models.email import Email
-from app.api.models.enum import EmailStatus
+from app.core.enum import EmailStatus
 from app.worker import celery_app
 
 

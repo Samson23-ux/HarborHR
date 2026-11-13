@@ -1,6 +1,6 @@
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 
 from app.api.schemas.response import Error, ErrorResponse
 from app.core.exceptions import (
@@ -8,12 +8,11 @@ from app.core.exceptions import (
     AuthorizationError,
     CredentialError,
     ErrorCode,
-    GithubSignInError,
     GoogleSignInError,
     InvalidOtpError,
     OauthSignInError,
-    RateLimitExceeded,
     OtpAttemptsExceededError,
+    RateLimitExceeded,
     ServerError,
     ServiceUnavailable,
     UserExistsError,
@@ -93,17 +92,6 @@ class ExceptionHandler:
         # TODO: Replace error message for google/github sign in error
         self._app.add_exception_handler(
             exc_class_or_status_code=GoogleSignInError,
-            handler=create_exception_handler(
-                status_code=403,
-                detail={
-                    "status": "error",
-                    "message": "User is not authorized to make the requested action",
-                },
-            ),
-        )
-
-        self._app.add_exception_handler(
-            exc_class_or_status_code=GithubSignInError,
             handler=create_exception_handler(
                 status_code=403,
                 detail={

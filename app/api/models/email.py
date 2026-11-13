@@ -6,7 +6,7 @@ from sqlalchemy import UUID, DateTime, Enum, PrimaryKeyConstraint, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.api.models.base import Base
-from app.api.models.enum import EmailStatus
+from app.core.enum import EmailStatus
 
 
 class Email(Base):

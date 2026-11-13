@@ -4,19 +4,6 @@ from uuid import uuid7
 
 import pytest
 import pytest_asyncio
-from app.api import models  # noqa: F401
-from app.api.models.base import Base
-from app.api.models.user import User
-from app.api.schemas.user import UserInDB
-from app.core.config import get_settings
-from app.core.security import Security
-from app.database.session import get_session
-from app.deps import (
-    get_redis_client,
-    read_limiter,
-    write_limiter,
-)
-from app.main import app
 from asgi_lifespan import LifespanManager
 from httpx import ASGITransport, AsyncClient, Response
 from redis.asyncio import Redis
@@ -31,17 +18,35 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.pool import NullPool
 
+from app.api import models  # noqa: F401
+from app.api.models.base import Base
+from app.api.models.user import User
+from app.api.schemas.user import UserInDB
+from app.core.config import get_settings
+from app.core.security import Security
+from app.database.session import get_session
+from app.deps import (
+    get_redis_client,
+    read_limiter,
+    write_limiter,
+)
+from app.main import app
+
 SECURITY = Security()
 SETTINGS = get_settings()
 
 
 @pytest_asyncio.fixture(scope="session")
 async def async_engine():
-    async_db_engine: AsyncEngine = create_async_engine(
-        url=SETTINGS.ASYNC_TEST_DB_URL, poolclass=NullPool
+    migration_db_engine: AsyncEngine = create_async_engine(
+        url=SETTINGS.ASYNC_OWNER_TEST_DB_URL, poolclass=NullPool
     )
 
-    async with async_db_engine.begin() as conn:
+    app_db_engine: AsyncEngine = create_async_engine(
+        url=SETTINGS.ASYNC_APP_TEST_DB_URL, poolclass=NullPool
+    )
+
+    async with migration_db_engine.begin() as conn:
         await conn.execute(
             text("""
             CREATE OR REPLACE FUNCTION uuid_generate_v7()
@@ -68,14 +73,15 @@ async def async_engine():
         )
         await conn.run_sync(Base.metadata.create_all)
 
-    yield async_db_engine
+    yield app_db_engine
 
-    async with async_db_engine.begin() as conn:
+    async with migration_db_engine.begin() as conn:
         await conn.execute(text("DROP FUNCTION IF EXISTS uuid_generate_v7 CASCADE"))
         await conn.execute(text("DROP EXTENSION IF EXISTS pgcrypto CASCADE"))
         await conn.run_sync(Base.metadata.drop_all)
 
-    await async_db_engine.dispose()
+    await app_db_engine.dispose()
+    await migration_db_engine.dispose()
 
 
 @pytest_asyncio.fixture

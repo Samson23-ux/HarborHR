@@ -19,8 +19,14 @@ from app.core.config import get_settings
 SETTINGS = get_settings()
 
 async_engine: AsyncEngine = create_async_engine(
-    url=SETTINGS.ASYNC_DB_URL,
-    connect_args={"server_settings": {"timezone": "utc"}, "statement_cache_size": 0},
+    url=SETTINGS.ASYNC_APP_DB_URL,
+    connect_args={
+        "server_settings": {
+            "timezone": "utc",
+            "idle_in_transaction_session_timeout": "90000",
+        },
+        "statement_cache_size": 0,
+    },
     pool_size=10,
     max_overflow=5,
     pool_timeout=10.0,
@@ -36,7 +42,7 @@ async_session = async_sessionmaker(
 )
 
 sync_engine: Engine = create_engine(
-    url=SETTINGS.SYNC_DB_URL,
+    url=SETTINGS.SYNC_APP_DB_URL,
     pool_size=10,
     pool_timeout=10.0,
     pool_pre_ping=True,
@@ -64,6 +70,6 @@ A redis client with:
 redis_client: Redis = Redis(connection_pool=redis_pool)
 
 
-async def get_session() -> AsyncGenerator[AsyncSession, None]:
+async def get_session() -> AsyncGenerator[AsyncSession]:
     async with async_session() as session:
         yield session

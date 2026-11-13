@@ -4,7 +4,6 @@ from authlib.integrations.base_client.errors import MismatchingStateError, OAuth
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import RedirectResponse
 
-from app.api.models.enum import OauthFailure
 from app.api.schemas.auth import (
     EmailLogin,
     EmailVerify,
@@ -20,6 +19,7 @@ from app.api.schemas.user import (
     GoogleUserResponse,
 )
 from app.core.config import get_settings
+from app.core.enum import OauthFailure
 from app.core.exceptions import (
     ErrorCode,
     GoogleSignInError,

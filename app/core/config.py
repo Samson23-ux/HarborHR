@@ -18,13 +18,15 @@ class Settings(BaseSettings):
     API_DESCRIPTION: str = "A payroll engine built for Nigerian SMEs"
 
     # async db
-    ASYNC_DB_URL: str
+    ASYNC_APP_DB_URL: str
+    ASYNC_OWNER_DB_URL: str
 
     # sync db
-    SYNC_DB_URL: str
+    SYNC_APP_DB_URL: str
 
     # test db
-    ASYNC_TEST_DB_URL: str
+    ASYNC_APP_TEST_DB_URL: str
+    ASYNC_OWNER_TEST_DB_URL: str
 
     # Argon2
     ARGON2_PASSWORD_PEPPER: str

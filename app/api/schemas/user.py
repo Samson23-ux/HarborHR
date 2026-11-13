@@ -9,6 +9,7 @@ from app.api.models.user import UserType
 class UserBase(BaseModel):
     id: UUID
     type: UserType
+    organization_id: UUID | None = None
     is_active: bool = False
     is_verified: bool = False
 

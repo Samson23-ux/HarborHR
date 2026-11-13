@@ -10,6 +10,7 @@ class AuthBase(BaseModel):
 class TokenData(AuthBase):
     user_id: UUID
     session_id: UUID
+    organization_id: UUID | None
 
 
 class Token(AuthBase):

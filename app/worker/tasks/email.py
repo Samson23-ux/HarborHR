@@ -5,7 +5,7 @@ from celery.exceptions import Reject
 from resend.exceptions import ResendError
 
 from app.api.models.email import Email
-from app.api.models.enum import EmailStatus
+from app.core.enum import EmailStatus
 from app.core.config import get_settings
 from app.core.exceptions import MaxRetriesError
 from app.worker import BaseTaskWithFailure, celery_app

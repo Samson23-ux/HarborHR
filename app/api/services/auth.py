@@ -3,7 +3,6 @@ from uuid import UUID, uuid4, uuid7
 import sentry_sdk
 import sentry_sdk.logger as sentry_logger
 
-from app.api.models.enum import UserType
 from app.api.models.user import User
 from app.api.repo.email import EmailRepository
 from app.api.repo.redis import RedisRepository
@@ -25,6 +24,7 @@ from app.api.services.email import EmailService
 from app.api.services.otp import OtpService
 from app.api.services.user import UserService
 from app.core.config import get_settings
+from app.core.enum import UserType
 from app.core.exceptions import (
     AuthenticationError,
     CredentialError,
@@ -71,8 +71,12 @@ class AuthService:
         )
         self._email_service = EmailService(email_repo=email_repo)
 
-    async def _get_tokens(self, user_id: UUID, security: Security):
-        token_data: TokenData = TokenData(user_id=user_id, session_id=uuid4())
+    async def _get_tokens(
+        self, user_id: UUID, organization_id: UUID | None, security: Security
+    ):
+        token_data: TokenData = TokenData(
+            user_id=user_id, organization_id=organization_id, session_id=uuid4()
+        )
         access_token, refresh_token_payload = await security.prepare_tokens(token_data)
 
         try:
@@ -276,7 +280,16 @@ class AuthService:
                 await user_service.create_user(user, user_email, commit=True)
 
             user_id = existing_user.id if existing_user else user.id
-            access_token, refresh_token = await self._get_tokens(user_id, security)
+
+            # TODO: Replace once sign-up flow is completed
+            if existing_user and existing_user.organization:
+                organization_id = existing_user.organization.id
+            else:
+                organization_id = user.organization_id
+
+            access_token, refresh_token = await self._get_tokens(
+                user_id, organization_id, security
+            )
 
             sentry_logger.info(
                 "Google sign-in completed for user {user_id}",
@@ -386,7 +399,9 @@ class AuthService:
 
         existing_user.is_active = True
         await user_service.update_user(existing_user, commit=True)
-        access_token, refresh_token = await self._get_tokens(existing_user.id, security)
+        access_token, refresh_token = await self._get_tokens(
+            existing_user.id, existing_user.organization.id, security
+        )
 
         sentry_logger.info(
             "Login completed for user {user_id}",
@@ -433,7 +448,11 @@ class AuthService:
                 details={"reason": "User not found"},
             )
 
-        token_data: TokenData = TokenData(user_id=user_id, session_id=claims.get("sid"))
+        token_data: TokenData = TokenData(
+            user_id=user_id,
+            organization_id=existing_user.organization.id,
+            session_id=claims.get("sid"),
+        )
         access_token, refresh_token_payload = await security.prepare_tokens(token_data)
 
         try:

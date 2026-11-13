@@ -1,11 +1,12 @@
+from collections.abc import Generator
 from typing import Any
+
 from redis import Redis
+from redis.backoff import ExponentialBackoff
+from redis.connection import ConnectionPool
+from redis.exceptions import ConnectionError, TimeoutError
 from redis.retry import Retry
 from sqlalchemy.orm import Session
-from collections.abc import Generator
-from redis.connection import ConnectionPool
-from redis.backoff import ExponentialBackoff
-from redis.exceptions import TimeoutError, ConnectionError
 
 from app.core.config import get_settings
 from app.database.session import sync_session
@@ -22,11 +23,11 @@ redis_pool = ConnectionPool.from_url(
 )
 
 
-def get_db_session() -> Generator[Session, Any, None]:
+def get_db_session() -> Generator[Session, Any]:
     with sync_session() as session:
         yield session
 
 
-def get_redis_client() -> Generator[Redis, Any, None]:
+def get_redis_client() -> Generator[Redis, Any]:
     with Redis(connection_pool=redis_pool) as redis:
         yield redis
