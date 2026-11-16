@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from uuid import UUID
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
@@ -94,12 +93,12 @@ class UserExistsError(AppException):
         self.user_email = user_email
 
 
-class UserNotFoundError(AppException):
-    """User not found"""
+class NotFoundError(AppException):
+    """Entity not found"""
 
-    def __init__(self, user_id: UUID):
-        super().__init__(ErrorCode.USER_NOT_FOUND)
-        self.user_id = str(user_id)
+    def __init__(self, entity: str):
+        super().__init__(ErrorCode.NOT_FOUND)
+        self.entity = entity
 
 
 class InvalidOtpError(AppException):

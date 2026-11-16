@@ -3,12 +3,16 @@ import sentry_sdk.logger as sentry_logger
 from authlib.integrations.base_client.errors import MismatchingStateError, OAuthError
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import RedirectResponse
+from pydantic_core import ValidationError
 
 from app.api.schemas.auth import (
     EmailLogin,
+    EmailSignUp,
     EmailVerify,
+    GoogleSignUp,
     LogoutResponse,
     OtpResendResponse,
+    ReactivateAccount,
     ResendOtp,
     SignUpResponse,
     Token,
@@ -17,6 +21,7 @@ from app.api.schemas.response import SuccessResponse
 from app.api.schemas.user import (
     EmailUserResponse,
     GoogleUserResponse,
+    UserResponse,
 )
 from app.core.config import get_settings
 from app.core.enum import OauthFailure
@@ -28,6 +33,7 @@ from app.core.exceptions import (
 from app.deps import (
     AuthServiceDep,
     CurrentActiveUser,
+    EmailServiceDep,
     OtpServiceDep,
     SecurityDep,
     UnitOfWorkRepo,
@@ -62,12 +68,12 @@ def _secure_cookie() -> bool:
 async def sign_up_with_email(
     request: Request,
     security: SecurityDep,
-    email_login: EmailLogin,
+    signup: EmailSignUp,
     otp_service: OtpServiceDep,
     auth_service: AuthServiceDep,
     uow: UnitOfWorkRepo,
 ):
-    await auth_service.sign_up_with_email(email_login, otp_service, security, uow)
+    await auth_service.sign_up_with_email(signup, otp_service, security, uow)
     return SuccessResponse(
         message=(
             "Sign up completed successfully."
@@ -76,14 +82,21 @@ async def sign_up_with_email(
     )
 
 
-@router.get(
+@router.post(
     "/auth/google",
     status_code=302,
     response_class=RedirectResponse,
     description="Sign in with Google account",
     dependencies=[write_limiter],
 )
-async def sign_in_with_google(request: Request, security: SecurityDep):
+async def sign_in_with_google(
+    request: Request, signup: GoogleSignUp, security: SecurityDep
+):
+    request.session["google_signup"] = {
+        "organization_name": signup.organization_name,
+        "organization_country": signup.organization_country,
+    }
+
     redirect_uri = SETTINGS.GOOGLE_CALLBACK_URL or request.url_for("google_callback")
     return await security.oauth.google.authorize_redirect(request, redirect_uri)
 
@@ -98,10 +111,11 @@ async def google_callback(
     request: Request,
     response: Response,
     security: SecurityDep,
+    uow: UnitOfWorkRepo,
     auth_service: AuthServiceDep,
-    user_service: UserServiceDep,
 ):
     error: str | None = request.query_params.get("error")
+
     if error:
         failure = (
             OauthFailure.ACCESS_DENIED
@@ -115,6 +129,14 @@ async def google_callback(
         )
 
         raise GoogleSignInError(code=code, details={"reason": failure})
+
+    try:
+        signup = GoogleSignUp(**request.session["google_signup"])
+    except ValidationError:
+        raise GoogleSignInError(
+            code=ErrorCode.OAUTH_ACCESS_DENIED,
+            details={"reason": "Invalid payload received"},
+        )
 
     try:
         payload = await security.oauth.google.authorize_access_token(request)
@@ -134,7 +156,7 @@ async def google_callback(
         )
 
     access_token, refresh_token = await auth_service.sign_up_with_google(
-        payload, user_service, security
+        payload, signup, security, uow
     )
 
     response.set_cookie(
@@ -252,7 +274,9 @@ async def create_new_token(
     "/auth/me",
     status_code=200,
     description="Get current active user",
-    response_model=SuccessResponse[EmailUserResponse | GoogleUserResponse],
+    response_model=SuccessResponse[
+        EmailUserResponse | GoogleUserResponse | UserResponse
+    ],
     dependencies=[read_limiter],
 )
 async def get_current_user(
@@ -260,9 +284,9 @@ async def get_current_user(
     curr_user: CurrentActiveUser,
     auth_service: AuthServiceDep,
 ):
-    user: EmailUserResponse | GoogleUserResponse = await auth_service.get_current_user(
-        curr_user
-    )
+    user: (
+        EmailUserResponse | GoogleUserResponse | UserResponse
+    ) = await auth_service.get_current_user(curr_user)
     return SuccessResponse(message="User retrieved successfully", data=user)
 
 
@@ -278,20 +302,38 @@ async def log_out(
     security: SecurityDep,
     curr_user: CurrentActiveUser,
     auth_service: AuthServiceDep,
-    user_service: UserServiceDep,
 ):
     refresh_token: str | None = request.cookies.get("refresh_token")
-    await auth_service.logout(curr_user, refresh_token, security, user_service)
+    await auth_service.logout(curr_user, refresh_token, security)
     return SuccessResponse(message="Log out completed successfully")
 
 
-@router.delete(
-    "/auth",
-    status_code=204,
-    description="Delete account permanently",
+@router.patch(
+    "/auth/reactivate",
+    status_code=200,
+    description="Reactivate account",
     dependencies=[write_limiter],
 )
-async def delete_account(
+async def reactivate_account(
+    request: Request,
+    otp_service: OtpServiceDep,
+    auth_service: AuthServiceDep,
+    user_service: UserServiceDep,
+    email_service: EmailServiceDep,
+    reactivate: ReactivateAccount,
+):
+    await auth_service.reactivate_account(
+        otp_service, user_service, email_service, reactivate
+    )
+
+
+@router.delete(
+    "/auth/deactivate",
+    status_code=204,
+    description="Deactivate account",
+    dependencies=[write_limiter],
+)
+async def deactivate_account(
     request: Request,
     security: SecurityDep,
     curr_user: CurrentActiveUser,
@@ -299,4 +341,6 @@ async def delete_account(
     user_service: UserServiceDep,
 ):
     refresh_token: str | None = request.cookies.get("refresh_token")
-    await auth_service.delete_account(curr_user, user_service, refresh_token, security)
+    await auth_service.deactivate_account(
+        curr_user, user_service, refresh_token, security
+    )

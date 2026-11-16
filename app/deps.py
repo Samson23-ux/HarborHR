@@ -8,12 +8,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.models.user import User
 from app.api.repo.email import EmailRepository
+from app.api.repo.organization import OrganizationRepository
 from app.api.repo.redis import RedisRepository
+from app.api.repo.role import RoleRepository
 from app.api.repo.uow import UnitOfWorkRepository
 from app.api.repo.user import UserRepository
 from app.api.services.auth import AuthService
 from app.api.services.email import EmailService
+from app.api.services.organization import OrganizationService
 from app.api.services.otp import OtpService
+from app.api.services.role import RoleService
 from app.api.services.user import UserService
 from app.core.config import get_settings
 from app.core.enum import Role
@@ -68,6 +72,14 @@ async def get_email_repo(session: DBSession) -> EmailRepository:
     return EmailRepository(async_session=session)
 
 
+async def get_organization_repo(session: DBSession) -> OrganizationRepository:
+    return OrganizationRepository(async_session=session)
+
+
+async def get_role_repo(session: DBSession) -> RoleRepository:
+    return RoleRepository(async_session=session)
+
+
 async def get_unit_of_work(session: DBSession) -> UnitOfWorkRepository:
     return UnitOfWorkRepository(async_session=session)
 
@@ -75,6 +87,8 @@ async def get_unit_of_work(session: DBSession) -> UnitOfWorkRepository:
 UserRepo = Annotated[UserRepository, Depends(get_user_repo)]
 RedisRepo = Annotated[RedisRepository, Depends(get_redis_repo)]
 EmailRepo = Annotated[EmailRepository, Depends(get_email_repo)]
+OrganizationRepo = Annotated[OrganizationRepository, Depends(get_organization_repo)]
+RoleRepo = Annotated[RoleRepository, Depends(get_role_repo)]
 UnitOfWorkRepo = Annotated[UnitOfWorkRepository, Depends(get_unit_of_work)]
 
 #  -------------------- Service dependency ---------------------------- #
@@ -86,6 +100,16 @@ async def get_user_service(user_repo: UserRepo, redis_repo: RedisRepo) -> UserSe
 
 async def get_email_service(email_repo: EmailRepo) -> EmailService:
     return EmailService(email_repo=email_repo)
+
+
+async def get_organization_service(
+    organization_repo: OrganizationRepo,
+) -> OrganizationService:
+    return OrganizationService(organization_repo=organization_repo)
+
+
+async def get_role_service(role_repo: RoleRepo) -> RoleService:
+    return RoleService(role_repo=role_repo)
 
 
 async def get_auth_service(redis_repo: RedisRepo) -> AuthService:
@@ -100,6 +124,10 @@ OtpServiceDep = Annotated[OtpService, Depends(get_otp_service)]
 AuthServiceDep = Annotated[AuthService, Depends(get_auth_service)]
 UserServiceDep = Annotated[UserService, Depends(get_user_service)]
 EmailServiceDep = Annotated[EmailService, Depends(get_email_service)]
+OrganizationServiceDep = Annotated[
+    OrganizationService, Depends(get_organization_service)
+]
+RoleServiceDep = Annotated[RoleService, Depends(get_role_service)]
 
 # ------------------------ Auth dependency ---------------------------- #
 
@@ -140,8 +168,7 @@ async def get_current_user(
     user_service: UserServiceDep,
     claims: AccessTokenClaims,
 ) -> User:
-    filters: dict = {"id": claims.get("sub")}
-    user: User = await user_service.get_user(**filters)
+    user: User = await user_service.get_user(id=claims.get("sub"), is_verified=True)
     return user
 
 

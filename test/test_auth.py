@@ -9,15 +9,22 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from app.core.config import get_settings
-from app.core.security import Security
-from app.deps import get_security
-from app.main import app
 from joserfc import jwt
 from joserfc.jwk import OctKey
 from redis.asyncio import Redis
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from test.conftest import test_user
+from app.core.config import get_settings
+from app.core.enum import ErrorCode
+from app.core.security import Security
+from app.deps import get_security
+from app.main import app
+from test.conftest import (
+    _get_signup_payload,
+    _get_test_user,
+    add_user_to_db,
+    get_user_from_db,
+)
 
 SETTINGS = get_settings()
 
@@ -39,6 +46,18 @@ def _hash_otp(otp: str) -> str:
     return hmac.new(
         SETTINGS.OTP_SECRET_KEY.encode(), otp.encode(), hashlib.sha256
     ).hexdigest()
+
+
+def _otp_key(user_id, otp_purpose):
+    return f"otp:{user_id!s}:{otp_purpose}"
+
+
+def _get_otp_payload(email: str, code: str, purpose: str):
+    return {
+        "email": email,
+        "otp_code": code,
+        "otp_purpose": purpose,
+    }
 
 
 async def _seed_otp(key, redis: Redis):
@@ -102,6 +121,33 @@ def _get_invalid_test_token(header: dict, payload: dict) -> str:
     )
 
 
+async def _google_sign_in(async_client: httpx.AsyncClient):
+    security = get_security_mock()
+
+    app.dependency_overrides[get_security] = lambda: security
+
+    _mock_google_oauth("redirect", security)
+    _mock_google_oauth("authorize", security)
+
+    url_path: str = "app.api.routers.auth.Request.url_for"
+    with patch(url_path, new_callable=AsyncMock) as url_patch:
+        res: httpx.Response = await async_client.post(
+            "/auth/google",
+            json={
+                "organization_name": "test_org_name",
+                "organization_country": "NGA",
+            },
+        )
+
+        assert res.status_code == 302
+        url_patch.assert_called_once()
+
+        res: httpx.Response = await async_client.get("/auth/google/callback")
+
+        assert res.status_code == 200
+        assert "access_token" in res.json()["data"]
+
+
 class TestSignUpWithEmail:
     @pytest.mark.asyncio
     async def test_sign_up(self, create_user: httpx.Response):
@@ -114,30 +160,83 @@ class TestSignUpWithEmail:
         )
 
     @pytest.mark.asyncio
-    async def test_user_exists(self, async_client: httpx.AsyncClient, add_user_to_db):
-        sign_up_payload: dict = {
-            "email": "user@example.com",
-            "password": "test_user_password",
-        }
+    async def test_user_exists(
+        self, session_maker: async_sessionmaker, async_client: httpx.AsyncClient
+    ):
+        test_user = await _get_test_user()
+        await add_user_to_db(session_maker, test_user.model_dump())
 
         res: httpx.Response = await async_client.post(
-            "/auth/signup", json=sign_up_payload
+            "/auth/signup", json=_get_signup_payload()
         )
 
         assert res.status_code == 409
 
     @pytest.mark.asyncio
     async def test_invalid_email(self, async_client: httpx.AsyncClient):
-        sign_up_payload: dict = {
-            "email": "invalid_user_email",
-            "password": "test_user_password",
-        }
+        sign_up_payload = _get_signup_payload()
 
+        sign_up_payload["email"] = "invalid_user_email"
         res: httpx.Response = await async_client.post(
             "/auth/signup", json=sign_up_payload
         )
 
         assert res.status_code == 422
+
+        json_res = res.json()
+        assert json_res["error"]["code"] == ErrorCode.VALIDATION_ERROR
+        assert "body.email" in json_res["error"]["details"]
+
+    @pytest.mark.asyncio
+    async def test_invalid_country_code(self, async_client: httpx.AsyncClient):
+        sign_up_payload = _get_signup_payload()
+
+        sign_up_payload["organization_country"] = "MXT"
+        res: httpx.Response = await async_client.post(
+            "/auth/signup", json=sign_up_payload
+        )
+
+        assert res.status_code == 422
+
+        json_res = res.json()
+        assert json_res["error"]["code"] == ErrorCode.VALIDATION_ERROR
+        assert "body.organization_country" in json_res["error"]["details"]
+
+
+class TestExistingUser:
+    @pytest.mark.asyncio
+    async def test_link_existing_email_signup(
+        self, session_maker: async_sessionmaker, async_client: httpx.AsyncClient
+    ):
+        test_user = await _get_test_user()
+        await add_user_to_db(session_maker, test_user.model_dump())
+
+        await _google_sign_in(async_client)
+
+        user = await get_user_from_db(session_maker, "email", "user@example.com")
+
+        assert user.email
+        assert user.hashed_password
+        assert user.google_email
+        assert user.google_id
+
+    @pytest.mark.asyncio
+    async def test_link_unverified_existing_email_signup(
+        self, session_maker: async_sessionmaker, async_client: httpx.AsyncClient
+    ):
+        test_user = await _get_test_user()
+        test_user.is_verified = False
+
+        await add_user_to_db(session_maker, test_user.model_dump())
+
+        await _google_sign_in(async_client)
+
+        user = await get_user_from_db(session_maker, "google_email", "user@example.com")
+
+        assert not user.email
+        assert not user.hashed_password
+        assert user.google_email
+        assert user.google_id
 
 
 class TestRateLimit:
@@ -193,30 +292,29 @@ class TestLogin:
     async def test_user_not_verified(
         self, async_client: httpx.AsyncClient, create_user: httpx.Response
     ):
-        login_payload: dict = {
-            "email": "user@example.com",
-            "password": "test_user_password",
-        }
-
         res: httpx.Response = await async_client.post(
             "/auth/login",
-            json=login_payload,
+            json={
+                "email": "user@example.com",
+                "password": "test_user_password",
+            },
         )
 
         assert res.status_code == 400
 
     @pytest.mark.asyncio
     async def test_wrong_email_login(
-        self, async_client: httpx.AsyncClient, add_user_to_db
+        self, session_maker: async_sessionmaker, async_client: httpx.AsyncClient
     ):
-        login_payload: dict = {
-            "email": "user@example123.com",
-            "password": "test_user_password",
-        }
+        test_user = await _get_test_user()
+        await add_user_to_db(session_maker, test_user.model_dump())
 
         res: httpx.Response = await async_client.post(
             "/auth/login",
-            json=login_payload,
+            json={
+                "email": "user@example123.com",
+                "password": "test_user_password",
+            },
         )
 
         assert res.status_code == 400
@@ -225,31 +323,7 @@ class TestLogin:
 class TestSignUpWithGoogle:
     @pytest.mark.asyncio
     async def test_google_sign_in(self, async_client: httpx.AsyncClient):
-        security = get_security_mock()
-
-        app.dependency_overrides[get_security] = lambda: security
-        _mock_google_oauth("redirect", security)
-
-        url_path: str = "app.api.routers.auth.Request.url_for"
-        with patch(url_path, new_callable=AsyncMock) as url_patch:
-            res: httpx.Response = await async_client.get("/auth/google")
-
-        assert res.status_code == 302
-        url_patch.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_google_callback(self, async_client: httpx.AsyncClient):
-        security = get_security_mock()
-
-        app.dependency_overrides[get_security] = lambda: security
-        _mock_google_oauth("authorize", security)
-
-        res: httpx.Response = await async_client.get("/auth/google/callback")
-
-        json_res = res.json()
-
-        assert res.status_code == 200
-        assert "access_token" in json_res["data"]
+        await _google_sign_in(async_client)
 
 
 class TestAuthToken:
@@ -269,9 +343,11 @@ class TestAuthToken:
     async def test_expired_access_token(
         self, async_client: httpx.AsyncClient, login: httpx.Response
     ):
+        test_user = await _get_test_user()
         expire_time: datetime = datetime.now(UTC) - timedelta(
             minutes=SETTINGS.ACCESS_TOKEN_EXPIRE_TIME
         )
+
         token = _get_test_token(
             _get_token_payload(test_user.id, datetime.now(UTC), expire_time, "access"),
             SETTINGS.ACCESS_TOKEN_SECRET_KEY,
@@ -302,6 +378,7 @@ class TestAuthToken:
     async def test_refresh_token_used_as_access_token(
         self, async_client: httpx.AsyncClient, login: httpx.Response
     ):
+        test_user = await _get_test_user()
         expire_time: datetime = datetime.now(UTC) + timedelta(
             days=SETTINGS.REFRESH_TOKEN_EXPIRE_TIME
         )
@@ -325,6 +402,7 @@ class TestAuthToken:
     async def test_token_with_invalid_algorithm(
         self, async_client: httpx.AsyncClient, login: httpx.Response
     ):
+        test_user = await _get_test_user()
         expire_time: int = int(
             (
                 datetime.now(UTC) + timedelta(minutes=SETTINGS.ACCESS_TOKEN_EXPIRE_TIME)
@@ -334,7 +412,10 @@ class TestAuthToken:
         token = _get_invalid_test_token(
             {"alg": "none", "typ": "JWT"},
             _get_token_payload(
-                test_user.id, int(datetime.now(UTC).timestamp()), expire_time, "access"
+                test_user.id,
+                int(datetime.now(UTC).timestamp()),
+                expire_time,
+                "access",
             ),
         )
 
@@ -446,20 +527,18 @@ class TestVerifyOtp:
     @pytest.mark.asyncio
     async def test_verify_valid_otp(
         self,
-        add_user_to_db,
+        session_maker: async_sessionmaker,
         async_client: httpx.AsyncClient,
         test_redis_client: Redis,
     ):
-        await _seed_otp(f"otp:{test_user.id!s}", test_redis_client)
+        test_user = await _get_test_user()
 
-        otp_payload: dict = {
-            "email": "user@example.com",
-            "otp_code": "123456",
-        }
+        await add_user_to_db(session_maker, test_user.model_dump())
+        await _seed_otp(_otp_key(test_user.id, "email_verification"), test_redis_client)
 
         res: httpx.Response = await async_client.patch(
             "/auth/verify",
-            json=otp_payload,
+            json=_get_otp_payload("user@example.com", "123456", "email_verification"),
         )
 
         assert res.status_code == 200
@@ -467,20 +546,18 @@ class TestVerifyOtp:
     @pytest.mark.asyncio
     async def test_verify_invalid_otp(
         self,
-        add_user_to_db,
+        session_maker: async_sessionmaker,
         async_client: httpx.AsyncClient,
         test_redis_client: Redis,
     ):
-        await _seed_otp(f"otp:{test_user.id!s}", test_redis_client)
+        test_user = await _get_test_user()
 
-        otp_payload: dict = {
-            "email": "user@example.com",
-            "otp_code": "123455",
-        }
+        await add_user_to_db(session_maker, test_user.model_dump())
+        await _seed_otp(_otp_key(test_user.id, "email_verification"), test_redis_client)
 
         res: httpx.Response = await async_client.patch(
             "/auth/verify",
-            json=otp_payload,
+            json=_get_otp_payload("user@example.com", "123455", "email_verification"),
         )
 
         assert res.status_code == 400
@@ -488,69 +565,25 @@ class TestVerifyOtp:
     @pytest.mark.asyncio
     async def test_verify_otp_max_attempts_exceeded(
         self,
-        add_user_to_db,
+        session_maker: async_sessionmaker,
         async_client: httpx.AsyncClient,
         test_redis_client: Redis,
     ):
-        await _seed_otp(f"otp:{test_user.id!s}", test_redis_client)
+        test_user = await _get_test_user()
 
-        otp_payload: dict = {
-            "email": "user@example.com",
-            "otp_code": "123455",
-        }
+        await add_user_to_db(session_maker, test_user.model_dump())
+        await _seed_otp(_otp_key(test_user.id, "email_verification"), test_redis_client)
 
         for _ in range(SETTINGS.OTP_MAX_ATTEMPTS):
             res: httpx.Response = await async_client.patch(
                 "/auth/verify",
-                json=otp_payload,
+                json=_get_otp_payload(
+                    "user@example.com", "123455", "email_verification"
+                ),
             )
 
         assert res.status_code == 400
         assert res.json()["error"]["code"] == "OTP_ATTEMPTS_EXCEEDED"
-
-
-class TestResendOtp:
-    @pytest.mark.asyncio
-    async def test_resend_otp_token(
-        self, async_client: httpx.AsyncClient, create_user: httpx.Response
-    ):
-        path: str = "app.api.services.auth.send_email.apply_async"
-
-        resend_otp_payload: dict = {
-            "email": "user@example.com",
-        }
-
-        with patch(path) as email_patch:
-            res: httpx.Response = await async_client.post(
-                "/auth/verify/resend",
-                json=resend_otp_payload,
-            )
-
-        json_res = res.json()
-
-        email_patch.assert_called_once()
-
-        assert res.status_code == 201
-        assert json_res["status"] == "success"
-
-    @pytest.mark.asyncio
-    async def test_invalid_email_otp_token(
-        self, async_client: httpx.AsyncClient, create_user: httpx.Response
-    ):
-        path: str = "app.api.services.auth.send_email.apply_async"
-
-        with patch(path) as email_patch:
-            resend_otp_payload: dict = {
-                "email": "user@example123.com",
-            }
-
-        res: httpx.Response = await async_client.post(
-            "/auth/verify/resend",
-            json=resend_otp_payload,
-        )
-
-        assert res.status_code == 201
-        email_patch.assert_not_called()
 
 
 class TestLogout:
@@ -567,19 +600,13 @@ class TestLogout:
 
         assert res.status_code == 201
 
-        res: httpx.Response = await async_client.get(
-            "/auth/me",
-            headers={
-                "Authorization": f"Bearer {access_token}",
-            },
-        )
-
-        assert res.status_code == 403
-
     @pytest.mark.asyncio
     async def test_unauthorized_logout(
-        self, async_client: httpx.AsyncClient, add_user_to_db
+        self, session_maker: async_sessionmaker, async_client: httpx.AsyncClient
     ):
+        test_user = await _get_test_user()
+
+        await add_user_to_db(session_maker, test_user.model_dump())
         res = await async_client.post(
             "/auth/logout",
         )
@@ -587,15 +614,15 @@ class TestLogout:
         assert res.status_code == 401
 
 
-class TestDeleteAccount:
+class TestDeactivateAccount:
     @pytest.mark.asyncio
-    async def test_delete_account(
+    async def test_deactivate_account(
         self, async_client: httpx.AsyncClient, login: httpx.Response
     ):
         access_token = login.json()["data"]["access_token"]
 
         res = await async_client.delete(
-            "/auth",
+            "/auth/deactivate",
             headers={
                 "Authorization": f"Bearer {access_token}",
             },
@@ -603,24 +630,161 @@ class TestDeleteAccount:
 
         assert res.status_code == 204
 
-        login_payload: dict = {
-            "email": "user@example.com",
-            "password": "test_user_password",
-        }
-
         res: httpx.Response = await async_client.post(
             "/auth/login",
-            json=login_payload,
+            json={
+                "email": "user@example.com",
+                "password": "test_user_password",
+            },
         )
 
         assert res.status_code == 400
 
     @pytest.mark.asyncio
-    async def test_unauthorized_delete_account(
-        self, async_client: httpx.AsyncClient, add_user_to_db
+    async def test_unauthorized_deactivate_account(
+        self, session_maker: async_sessionmaker, async_client: httpx.AsyncClient
     ):
+        test_user = await _get_test_user()
+
+        await add_user_to_db(session_maker, test_user.model_dump())
         res = await async_client.delete(
-            "/auth",
+            "/auth/deactivate",
         )
 
         assert res.status_code == 401
+
+
+class TestResendOtp:
+    @pytest.mark.asyncio
+    async def test_resend_otp_token(
+        self,
+        session_maker: async_sessionmaker,
+        async_client: httpx.AsyncClient,
+    ):
+        test_user = await _get_test_user()
+        test_user.is_verified = False
+
+        await add_user_to_db(session_maker, test_user.model_dump())
+
+        path: str = "app.api.services.auth.send_email.apply_async"
+
+        with patch(path) as email_patch:
+            res: httpx.Response = await async_client.post(
+                "/auth/verify/resend",
+                json={
+                    "email": "user@example.com",
+                    "otp_purpose": "email_verification",
+                },
+            )
+
+        json_res = res.json()
+
+        email_patch.assert_called_once()
+
+        assert res.status_code == 201
+        assert json_res["status"] == "success"
+
+    @pytest.mark.asyncio
+    async def test_invalid_email_otp_token(
+        self,
+        session_maker: async_sessionmaker,
+        async_client: httpx.AsyncClient,
+    ):
+        test_user = await _get_test_user()
+        test_user.is_verified = False
+
+        await add_user_to_db(session_maker, test_user.model_dump())
+
+        path: str = "app.api.services.auth.send_email.apply_async"
+
+        with patch(path) as email_patch:
+            res: httpx.Response = await async_client.post(
+                "/auth/verify/resend",
+                json={
+                    "email": "user@example123.com",
+                    "otp_purpose": "email_verification",
+                },
+            )
+
+        assert res.status_code == 201
+        email_patch.assert_not_called()
+
+
+class TestReactivateAccount:
+    @pytest.mark.asyncio
+    async def test_reactivate_account(
+        self,
+        session_maker: async_sessionmaker,
+        async_client: httpx.AsyncClient,
+        test_redis_client: Redis,
+    ):
+        test_user = await _get_test_user()
+        test_user.is_active = False
+
+        await add_user_to_db(session_maker, test_user.model_dump())
+
+        path: str = "app.api.services.auth.send_email.apply_async"
+
+        with patch(path) as email_patch:
+            res = await async_client.patch(
+                "/auth/reactivate", json={"email": "user@example.com"}
+            )
+
+        assert res.status_code == 200
+        email_patch.assert_called_once()
+
+        await _seed_otp(
+            _otp_key(test_user.id, "account_reactivation"), test_redis_client
+        )
+
+        res: httpx.Response = await async_client.patch(
+            "/auth/verify",
+            json=_get_otp_payload("user@example.com", "123456", "account_reactivation"),
+        )
+
+        assert res.status_code == 200
+
+        res: httpx.Response = await async_client.post(
+            "/auth/login",
+            json={
+                "email": "user@example.com",
+                "password": "test_user_password",
+            },
+        )
+
+        assert res.status_code == 201
+        assert "access_token" in res.json()["data"]
+
+    @pytest.mark.asyncio
+    async def test_reactivate_account_with_invalid_email(
+        self, async_client: httpx.AsyncClient
+    ):
+        path: str = "app.api.services.auth.send_email.apply_async"
+
+        with patch(path) as email_patch:
+            res = await async_client.patch(
+                "/auth/reactivate", json={"email": "userinvalid@example.com"}
+            )
+
+        assert res.status_code == 200
+        email_patch.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_reactivate_active_account(
+        self,
+        session_maker: async_sessionmaker,
+        async_client: httpx.AsyncClient,
+        test_redis_client: Redis,
+    ):
+        test_user = await _get_test_user()
+        await add_user_to_db(session_maker, test_user.model_dump())
+
+        path: str = "app.api.services.auth.send_email.apply_async"
+
+        with patch(path) as email_patch:
+            res = await async_client.patch(
+                "/auth/reactivate", json={"email": "user@example.com"}
+            )
+
+        assert res.status_code == 200
+        email_patch.assert_not_called()

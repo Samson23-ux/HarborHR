@@ -3,12 +3,11 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr
 
-from app.api.models.user import UserType
-
 
 class UserBase(BaseModel):
     id: UUID
-    type: UserType
+    role_id: UUID
+    employee_id: UUID | None = None
     organization_id: UUID | None = None
     is_active: bool = False
     is_verified: bool = False
@@ -29,13 +28,27 @@ class UserInDB(GoogleUser, EmailUser):
     hashed_password: str | None = None
 
 
-class UserResponse(BaseModel):
+class BaseResponse(BaseModel):
+    id: UUID
+    role_id: UUID
+    employee_id: UUID | None = None
+    organization_id: UUID | None = None
+    is_active: bool
+    is_verified: bool
+    updated_at: datetime | None
     created_at: datetime
 
-
-class GoogleUserResponse(GoogleUser, UserResponse):
-    pass
+    model_config = ConfigDict(from_attributes=True)
 
 
-class EmailUserResponse(EmailUser, UserResponse):
+class GoogleUserResponse(GoogleUser, BaseResponse):
+    google_id: str
+    google_email: EmailStr
+
+
+class EmailUserResponse(EmailUser, BaseResponse):
+    email: EmailStr
+
+
+class UserResponse(EmailUser, GoogleUser, BaseResponse):
     pass

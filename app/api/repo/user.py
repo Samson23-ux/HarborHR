@@ -1,6 +1,8 @@
 from datetime import datetime
 from typing import Any
 
+from sqlalchemy import and_, or_, select
+
 from app.api.models.user import User
 from app.api.repo.base import BaseRepository
 from app.api.schemas.user import UserBase
@@ -20,8 +22,6 @@ class UserRepository(BaseRepository[UserBase, User]):
 
         if "id" in filters:
             filter_conditions.append(self.model.id == filters["id"])
-        if "type" in filters:
-            filter_conditions.append(self.model.type == filters["type"])
         if "email" in filters:
             filter_conditions.append(self.model.email == filters["email"])
         if "google_email" in filters:
@@ -32,6 +32,15 @@ class UserRepository(BaseRepository[UserBase, User]):
             filter_conditions.append(self.model.is_verified.is_(filters["is_verified"]))
 
         return filter_conditions
+
+    def _email_or_google_user(self, email):
+        return or_(
+            and_(self.model.email.is_not(None), self.model.email == email),
+            and_(
+                self.model.google_email.is_not(None),
+                self.model.google_email == email,
+            ),
+        )
 
     def _parse_cursor_value(self, val: Any) -> tuple[bool, Any]:
         is_valid = False
@@ -57,3 +66,20 @@ class UserRepository(BaseRepository[UserBase, User]):
             sort_field = sort
 
         return self.SORT_FIELDS, column, sort_field
+
+    async def get_existing_user(self, email: str) -> User | None:
+        res = await self.async_session.execute(
+            select(self.model).where(self._email_or_google_user(email))
+        )
+
+        return res.scalar()
+
+    async def get_user_for_reactivation(self, email: str) -> User | None:
+        res = await self.async_session.execute(
+            select(self.model).where(
+                self._email_or_google_user(email),
+                self.model.is_active.is_(False),
+            )
+        )
+
+        return res.scalar()

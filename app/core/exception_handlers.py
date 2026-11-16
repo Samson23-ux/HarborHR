@@ -10,13 +10,13 @@ from app.core.exceptions import (
     ErrorCode,
     GoogleSignInError,
     InvalidOtpError,
+    NotFoundError,
     OauthSignInError,
     OtpAttemptsExceededError,
     RateLimitExceeded,
     ServerError,
     ServiceUnavailable,
     UserExistsError,
-    UserNotFoundError,
     create_exception_handler,
 )
 
@@ -135,12 +135,12 @@ class ExceptionHandler:
         )
 
         self._app.add_exception_handler(
-            exc_class_or_status_code=UserNotFoundError,
+            exc_class_or_status_code=NotFoundError,
             handler=create_exception_handler(
                 status_code=404,
                 detail={
                     "status": "error",
-                    "message": "User not found with id {user_id}",
+                    "message": "{entity} not found",
                 },
             ),
         )

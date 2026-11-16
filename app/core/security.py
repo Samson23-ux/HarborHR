@@ -32,7 +32,6 @@ class Security:
             sid={"essential": True},
             typ={"essential": True, "value": token_type},
             iss={"essential": True, "value": self.SETTINGS.JWT_TOKEN_ISS},
-            org_id={"essential": True},
         )
 
     async def validate_registry(self, token_type, claims):
@@ -84,7 +83,9 @@ class Security:
             "typ": "access",
             "iat": datetime.now(UTC),
             "sid": str(token_data.session_id),
-            "org_id": token_data.organization_id or ""
+            "org_id": str(token_data.organization_id)
+            if token_data.organization_id
+            else "",
         }
 
         return await self._encode(payload, self.SETTINGS.ACCESS_TOKEN_SECRET_KEY)
@@ -107,7 +108,9 @@ class Security:
             "iat": datetime.now(UTC),
             "jti": str(uuid4()),
             "sid": str(token_data.session_id),
-            "org_id": token_data.organization_id or ""
+            "org_id": str(token_data.organization_id)
+            if token_data.organization_id
+            else "",
         }
 
         return await self._encode(
@@ -123,7 +126,7 @@ class Security:
                 jwt.decode,
                 token,
                 OctKey.import_key(key),
-                algorithms=[self.SETTINGS.JWT_ALGORITHM],
+                [self.SETTINGS.JWT_ALGORITHM],
             )
 
             await self.validate_registry(token_type, decoded.claims)

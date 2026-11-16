@@ -17,14 +17,14 @@ class Settings(BaseSettings):
     API_VERSION: str = "v1.0"
     API_DESCRIPTION: str = "A payroll engine built for Nigerian SMEs"
 
-    # async db
+    # db
     ASYNC_APP_DB_URL: str
     ASYNC_OWNER_DB_URL: str
-
-    # sync db
     SYNC_APP_DB_URL: str
-
-    # test db
+    DB_TEST: str
+    DB_TEST_USER: str
+    DB_TEST_PASSWORD: str
+    DB_OWNER_ROLE: str
     ASYNC_APP_TEST_DB_URL: str
     ASYNC_OWNER_TEST_DB_URL: str
 

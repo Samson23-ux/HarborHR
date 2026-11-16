@@ -22,6 +22,7 @@ dependencies = [
     "resend",
     "sentry-sdk",
     "sqlalchemy",
+    "pycountry>=26.2.16",
 ]
 
 [dependency-groups]

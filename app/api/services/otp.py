@@ -18,8 +18,8 @@ class OtpService:
         self._redis_repo = redis_repo
 
     @staticmethod
-    def _otp_key(user_id: UUID) -> str:
-        return f"otp:{user_id!s}"
+    def _otp_key(user_id: UUID, otp_purpose: str) -> str:
+        return f"otp:{user_id!s}:{otp_purpose}"
 
     def _hash_otp(self, otp: str) -> str:
         return hmac.new(
@@ -30,12 +30,12 @@ class OtpService:
     def _otp_expire() -> int:
         return SETTINGS.OTP_EXPIRE_TIME * 60
 
-    async def create_otp(self, user_id: UUID) -> str:
+    async def create_otp(self, user_id: UUID, otp_purpose: str) -> str:
         otp: str = str(secrets.randbelow(900000) + 100000)
 
         try:
             await self._redis_repo.create_hset(
-                self._otp_key(user_id),
+                self._otp_key(user_id, otp_purpose),
                 {"code": self._hash_otp(otp), "attempts": 0},
                 self._otp_expire(),
             )
@@ -50,10 +50,12 @@ class OtpService:
 
         return otp
 
-    async def verify_otp(self, user_id: UUID, otp: str):
+    async def verify_otp(self, user_id: UUID, otp_purpose: str, otp: str):
         try:
             otp_state = await self._redis_repo.consume_otp_code(
-                self._otp_key(user_id), self._hash_otp(otp), SETTINGS.OTP_MAX_ATTEMPTS
+                self._otp_key(user_id, otp_purpose),
+                self._hash_otp(otp),
+                SETTINGS.OTP_MAX_ATTEMPTS,
             )
         except Exception as exc:
             sentry_sdk.capture_exception(exc)

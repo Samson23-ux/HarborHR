@@ -8,7 +8,7 @@ from app.api.repo.redis import RedisRepository
 from app.api.repo.user import UserRepository
 from app.api.schemas.user import UserInDB
 from app.core.config import get_settings
-from app.core.exceptions import ServerError, UserNotFoundError
+from app.core.exceptions import NotFoundError, ServerError
 from app.serializers import _deserialize_cached_user, _serialize_user
 
 SETTINGS = get_settings()
@@ -31,12 +31,12 @@ class UserService:
                 sentry_logger.warning(
                     "User not found with id {user_id}", user_id=filters.get("id")
                 )
-                raise UserNotFoundError(user_id=filters.get("id"))
+                raise NotFoundError(entity="User")
 
             return user
         except Exception as exc:
-            if isinstance(exc, UserNotFoundError):
-                raise UserNotFoundError(user_id=filters.get("id")) from exc
+            if isinstance(exc, NotFoundError):
+                raise NotFoundError(entity="User") from exc
 
             sentry_sdk.capture_exception(exc)
             sentry_logger.error(
@@ -47,6 +47,12 @@ class UserService:
 
     async def _get_user(self, **filters) -> User | None:
         return await self._user_repo.get_record(**filters)
+
+    async def get_existing_user(self, email) -> User | None:
+        return await self._user_repo.get_existing_user(email)
+
+    async def get_user_for_reactivation(self, email: str) -> User | None:
+        return await self._user_repo.get_user_for_reactivation(email)
 
     async def create_user(
         self, user: UserInDB, email: str, commit: bool = False
@@ -81,7 +87,7 @@ class UserService:
                 sentry_logger.info(
                     "Cached user not found with id {user_id}", user_id=filters.get("id")
                 )
-                raise UserNotFoundError(user_id=filters.get("id"))
+                raise NotFoundError(entity="User")
 
             return cached_user
 

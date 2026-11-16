@@ -7,8 +7,8 @@ from typing import TYPE_CHECKING
 from sqlalchemy import (
     UUID,
     Boolean,
+    CheckConstraint,
     DateTime,
-    Enum,
     ForeignKey,
     Index,
     PrimaryKeyConstraint,
@@ -18,20 +18,17 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.api.models.base import Base
-from app.core.enum import UserType
 
 if TYPE_CHECKING:
     from app.api.models.organization import Organization
     from app.api.models.role import Role
+
 
 class User(Base):
     __tablename__ = "users"
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID, server_default=text("uuid_generate_v7()")
-    )
-    type: Mapped[UserType] = mapped_column(
-        Enum(UserType, values_callable=lambda e: [m.value for m in e])
     )
     email: Mapped[str | None] = mapped_column(String, unique=True)
     hashed_password: Mapped[str | None] = mapped_column(String)
@@ -65,6 +62,13 @@ class User(Base):
 
     __table_args__ = (
         PrimaryKeyConstraint("id", name="users_pk"),
+        CheckConstraint(
+            """
+                email IS NOT NULL AND hashed_password IS NOT NULL OR
+                google_id IS NOT NULL AND google_email IS NOT NULL
+            """,
+            name="users_auth_ck",
+        ),
         Index("idx_users_email", email),
         Index("idx_users_role_id", role_id),
         Index("idx_users_employee_id", employee_id),

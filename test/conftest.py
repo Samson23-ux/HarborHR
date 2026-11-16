@@ -1,4 +1,3 @@
-import asyncio
 from unittest.mock import patch
 from uuid import uuid7
 
@@ -7,7 +6,7 @@ import pytest_asyncio
 from asgi_lifespan import LifespanManager
 from httpx import ASGITransport, AsyncClient, Response
 from redis.asyncio import Redis
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import (
     AsyncConnection,
     AsyncEngine,
@@ -20,9 +19,12 @@ from sqlalchemy.pool import NullPool
 
 from app.api import models  # noqa: F401
 from app.api.models.base import Base
+from app.api.models.organization import Organization
+from app.api.models.role import Role as DbRole
 from app.api.models.user import User
 from app.api.schemas.user import UserInDB
 from app.core.config import get_settings
+from app.core.enum import Role
 from app.core.security import Security
 from app.database.session import get_session
 from app.deps import (
@@ -36,19 +38,37 @@ SECURITY = Security()
 SETTINGS = get_settings()
 
 
-@pytest_asyncio.fixture(scope="session")
-async def async_engine():
-    migration_db_engine: AsyncEngine = create_async_engine(
-        url=SETTINGS.ASYNC_OWNER_TEST_DB_URL, poolclass=NullPool
+async def prepare_database(conn: AsyncConnection):
+    await conn.execute(
+        text(f"""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{SETTINGS.DB_TEST_USER}') THEN
+                    CREATE ROLE {SETTINGS.DB_TEST_USER} LOGIN PASSWORD '{SETTINGS.DB_TEST_PASSWORD}'
+                        NOSUPERUSER NOBYPASSRLS;
+                END IF;
+            END $$;
+        """)
+    )
+    await conn.execute(
+        text(f"""
+            GRANT CONNECT ON DATABASE {SETTINGS.DB_TEST} TO {SETTINGS.DB_TEST_USER};
+        """)
     )
 
-    app_db_engine: AsyncEngine = create_async_engine(
-        url=SETTINGS.ASYNC_APP_TEST_DB_URL, poolclass=NullPool
+    await conn.execute(
+        text(f"GRANT USAGE ON SCHEMA public TO {SETTINGS.DB_TEST_USER};")
     )
 
-    async with migration_db_engine.begin() as conn:
-        await conn.execute(
-            text("""
+    await conn.execute(
+        text(f"""
+            ALTER DEFAULT PRIVILEGES FOR ROLE {SETTINGS.DB_OWNER_ROLE} IN SCHEMA public
+                GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {SETTINGS.DB_TEST_USER};
+        """)
+    )
+
+    await conn.execute(
+        text("""
             CREATE OR REPLACE FUNCTION uuid_generate_v7()
                 RETURNS UUID
                 LANGUAGE SQL
@@ -70,15 +90,36 @@ async def async_engine():
                     )::uuid
                 $$;
         """)
-        )
-        await conn.run_sync(Base.metadata.create_all)
+    )
+
+    await conn.execute(text("CREATE EXTENSION IF NOT EXISTS btree_gist;"))
+    await conn.run_sync(Base.metadata.create_all)
+
+
+async def clean_database(conn: AsyncConnection):
+    await conn.execute(text("DROP FUNCTION IF EXISTS uuid_generate_v7 CASCADE;"))
+    await conn.execute(text("DROP EXTENSION IF EXISTS pgcrypto CASCADE;"))
+    await conn.run_sync(Base.metadata.drop_all)
+    await conn.execute(text("DROP EXTENSION IF EXISTS btree_gist;"))
+
+
+@pytest_asyncio.fixture(scope="session")
+async def async_engine():
+    migration_db_engine: AsyncEngine = create_async_engine(
+        url=SETTINGS.ASYNC_OWNER_TEST_DB_URL, poolclass=NullPool
+    )
+
+    app_db_engine: AsyncEngine = create_async_engine(
+        url=SETTINGS.ASYNC_APP_TEST_DB_URL, poolclass=NullPool
+    )
+
+    async with migration_db_engine.begin() as conn:
+        await prepare_database(conn)
 
     yield app_db_engine
 
     async with migration_db_engine.begin() as conn:
-        await conn.execute(text("DROP FUNCTION IF EXISTS uuid_generate_v7 CASCADE"))
-        await conn.execute(text("DROP EXTENSION IF EXISTS pgcrypto CASCADE"))
-        await conn.run_sync(Base.metadata.drop_all)
+        await clean_database(conn)
 
     await app_db_engine.dispose()
     await migration_db_engine.dispose()
@@ -164,19 +205,72 @@ async def async_client(
     app.dependency_overrides.clear()
 
 
+APP_ROLE = {
+    "staff": {"id": uuid7(), "name": Role.STAFF},
+    "admin": {"id": uuid7(), "name": Role.ADMIN},
+    "payroll_officer": {"id": uuid7(), "name": Role.PAYROLL_OFFICER},
+    "employee": {"id": uuid7(), "name": Role.EMPLOYEE},
+}
+
+
+async def _get_test_user():
+    return UserInDB(
+        id=uuid7(),
+        role_id=APP_ROLE[Role.STAFF]["id"],
+        is_active=True,
+        is_verified=True,
+        email="user@example.com",
+        hashed_password=await SECURITY.hash_password("test_user_password"),
+    )
+
+
+def _get_signup_payload():
+    return {
+        "email": "user@example.com",
+        "password": "test_user_password",
+        "organization_name": "test_org_name",
+        "organization_country": "NGA",
+    }
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def seed_role(session_maker: async_sessionmaker):
+    async with session_maker() as session:
+        for v in APP_ROLE.values():
+            session.add(DbRole(**v))
+        await session.commit()
+
+
+async def add_user_to_db(session_maker: async_sessionmaker, user: dict):
+    async with session_maker() as session:
+        org_id = uuid7()
+        user["organization_id"] = org_id
+
+        session.add(Organization(id=org_id, name="test_org_name_", country="ESP"))
+        await session.flush()
+
+        session.add(User(**user))
+        await session.commit()
+
+
+async def get_user_from_db(session_maker: async_sessionmaker, key: str, value: str):
+    filters = {
+        "email": User.email,
+        "google_email": User.google_email
+    }
+    async with session_maker() as session:
+        res = await session.execute(select(User).where(filters[key] == value))
+        return res.scalar()
+
+
 @pytest_asyncio.fixture
 async def create_user(async_client: AsyncClient):
     path: str = "app.api.services.auth.send_email.apply_async"
 
-    sign_up_payload: dict = {
-        "email": "user@example.com",
-        "password": "test_user_password",
-    }
-
     with patch(path) as email_patch:
         res: Response = await async_client.post(
             "/auth/signup",
-            json=sign_up_payload,
+            json=_get_signup_payload(),
         )
 
     email_patch.assert_called_once()
@@ -184,25 +278,11 @@ async def create_user(async_client: AsyncClient):
     return res
 
 
-test_user = UserInDB(
-    id=uuid7(),
-    type="email",
-    is_active=True,
-    is_verified=True,
-    email="user@example.com",
-    hashed_password=asyncio.run(SECURITY.hash_password("test_user_password")),
-)
-
-
 @pytest_asyncio.fixture
-async def add_user_to_db(session_maker: async_sessionmaker):
-    async with session_maker() as session:
-        session.add(User(**test_user.model_dump()))
-        await session.commit()
+async def login(session_maker: async_sessionmaker, async_client: AsyncClient):
+    test_user = await _get_test_user()
+    await add_user_to_db(session_maker, test_user.model_dump())
 
-
-@pytest_asyncio.fixture
-async def login(async_client: AsyncClient, add_user_to_db):
     login_payload: dict = {
         "email": "user@example.com",
         "password": "test_user_password",

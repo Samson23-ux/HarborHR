@@ -6,7 +6,6 @@ from app.api.models.user import User
 def _serialize_user(user: User) -> dict:
     return {
         "id": str(user.id),
-        "type": user.type.value,
         "email": user.email or "",
         "hashed_password": user.hashed_password or "",
         "google_id": user.google_id or "",

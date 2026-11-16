@@ -1,11 +1,6 @@
 from enum import StrEnum
 
 
-class UserType(StrEnum):
-    EMAIL = "email"
-    GOOGLE = "google"
-
-
 class EmailStatus(StrEnum):
     PENDING = "pending"
     DELIVERED = "delivered"
@@ -29,6 +24,11 @@ class InviteStatus(StrEnum):
     ACTIVE = "active"
     EXPIRED = "expired"
     REVOKED = "revoked"
+
+
+class OtpPurpose(StrEnum):
+    EMAIL_VERIFICATION = "email_verification"
+    ACCOUNT_REACTIVATION = "account_reactivation"
 
 
 class ErrorCode(StrEnum):
@@ -62,7 +62,7 @@ class ErrorCode(StrEnum):
     # user / account
     UNVERIFIED_EMAIL = "UNVERIFIED_EMAIL"
     USER_EXISTS = "USER_EXISTS"
-    USER_NOT_FOUND = "USER_NOT_FOUND"
+    NOT_FOUND = "NOT_FOUND"
     INVALID_CREDENTIALS = "INVALID_CREDENTIALS"
 
     # otp

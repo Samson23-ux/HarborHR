@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from uuid import UUID, uuid4, uuid7
 
 import sentry_sdk
@@ -5,26 +6,35 @@ import sentry_sdk.logger as sentry_logger
 
 from app.api.models.user import User
 from app.api.repo.email import EmailRepository
+from app.api.repo.organization import OrganizationRepository
 from app.api.repo.redis import RedisRepository
+from app.api.repo.role import RoleRepository
 from app.api.repo.uow import UnitOfWorkRepository
 from app.api.repo.user import UserRepository
 from app.api.schemas.auth import (
     EmailLogin,
+    EmailSignUp,
     EmailVerify,
+    GoogleSignUp,
+    ReactivateAccount,
     ResendOtp,
     TokenData,
 )
 from app.api.schemas.email import EmailInDB
+from app.api.schemas.organization import OrganizationInDB
 from app.api.schemas.user import (
     EmailUserResponse,
     GoogleUserResponse,
     UserInDB,
+    UserResponse,
 )
 from app.api.services.email import EmailService
+from app.api.services.organization import OrganizationService
 from app.api.services.otp import OtpService
+from app.api.services.role import RoleService
 from app.api.services.user import UserService
 from app.core.config import get_settings
-from app.core.enum import UserType
+from app.core.enum import OtpPurpose, Role
 from app.core.exceptions import (
     AuthenticationError,
     CredentialError,
@@ -65,11 +75,32 @@ class AuthService:
 
         user_repo = self._uow.repo(UserRepository)
         email_repo = self._uow.repo(EmailRepository)
+        organization_repo = self._uow.repo(OrganizationRepository)
+        role_repo = self._uow.repo(RoleRepository)
 
         self._user_service = UserService(
             user_repo=user_repo, redis_repo=self._redis_repo
         )
         self._email_service = EmailService(email_repo=email_repo)
+        self._organization_service = OrganizationService(
+            organization_repo=organization_repo
+        )
+        self._role_service = RoleService(role_repo=role_repo)
+
+    async def _uow_google_sign_in(self, uow: UnitOfWorkRepository):
+        await self._setup_uow(uow)
+
+        user_repo = self._uow.repo(UserRepository)
+        role_repo = self._uow.repo(RoleRepository)
+        organization_repo = self._uow.repo(OrganizationRepository)
+
+        self._user_service = UserService(
+            user_repo=user_repo, redis_repo=self._redis_repo
+        )
+        self._organization_service = OrganizationService(
+            organization_repo=organization_repo
+        )
+        self._role_service = RoleService(role_repo=role_repo)
 
     async def _get_tokens(
         self, user_id: UUID, organization_id: UUID | None, security: Security
@@ -169,6 +200,7 @@ class AuthService:
         email_subject: str,
         recipient_email: str,
         user_id: UUID,
+        otp_purpose: str,
     ):
         email_db: EmailInDB = EmailInDB(id=uuid7(), processed_email=recipient_email)
         await self._email_service.create_email(email_db)
@@ -178,7 +210,7 @@ class AuthService:
             kwargs={
                 "email_subject": email_subject,
                 "email_message": verification_message(
-                    await otp_service.create_otp(user_id)
+                    await otp_service.create_otp(user_id, otp_purpose)
                 ),
                 "recipient_email": recipient_email,
             },
@@ -186,7 +218,7 @@ class AuthService:
 
     async def sign_up_with_email(
         self,
-        email_login: EmailLogin,
+        signup: EmailSignUp,
         otp_service: OtpService,
         security: Security,
         uow: UnitOfWorkRepository,
@@ -194,16 +226,16 @@ class AuthService:
         await self._uow_user_otp_email(uow)
 
         try:
-            existing_user: User | None = await self._user_service._get_user(
-                email=email_login.email
+            existing_user: User | None = await self._user_service.get_existing_user(
+                signup.email
             )
 
-            if existing_user and existing_user.is_verified:
+            if existing_user and existing_user.email and existing_user.is_verified:
                 sentry_logger.warning(
                     "User {user_id} exists with the email provided for sign-up",
                     user_id=existing_user.id,
                 )
-                raise UserExistsError(user_email=email_login.email)
+                raise UserExistsError(user_email=signup.email)
         except UserExistsError:
             raise
         except Exception as exc:
@@ -214,28 +246,50 @@ class AuthService:
             raise ServerError() from exc
 
         try:
-            hashed_password: str = await security.hash_password(email_login.password)
+            hashed_password: str = await security.hash_password(signup.password)
+
+            """Link an existing verified google signup account"""
 
             if existing_user:
+                existing_user.email = signup.email
                 existing_user.hashed_password = hashed_password
+
+                existing_user.updated_at = datetime.now(UTC)
                 await self._user_service.update_user(existing_user)
-            else:
+
+            if not existing_user:
+                org = await self._organization_service.create_organization(
+                    OrganizationInDB(
+                        id=uuid7(),
+                        name=signup.organization_name,
+                        country=signup.organization_country,
+                    )
+                )
+
+                role_id: UUID | None = await self._role_service.select_role_id(
+                    name=Role.ADMIN
+                )
+
                 user = UserInDB(
                     id=uuid7(),
-                    type=UserType.EMAIL,
-                    email=email_login.email,
+                    email=signup.email,
+                    role_id=role_id,
+                    is_active=True,
+                    organization_id=org.id,
                     hashed_password=hashed_password,
                 )
-                await self._user_service.create_user(user, email_login.email)
+
+                await self._user_service.create_user(user, signup.email)
 
             user_id = existing_user.id if existing_user else user.id
 
             await self._uow.commit()
             await self._send_email(
                 otp_service,
-                "Email Verification Code",
-                email_login.email,
+                OtpPurpose.EMAIL_VERIFICATION,
+                signup.email,
                 user_id,
+                OtpPurpose.EMAIL_VERIFICATION,
             )
 
             sentry_logger.info(
@@ -252,40 +306,70 @@ class AuthService:
             raise ServerError() from exc
 
     async def sign_up_with_google(
-        self, payload: dict, user_service: UserService, security: Security
+        self,
+        payload: dict,
+        signup: GoogleSignUp,
+        security: Security,
+        uow: UnitOfWorkRepository,
     ) -> tuple[str, str]:
+        await self._uow_user_otp_email(uow)
+
         try:
             user_info: dict = payload.get("userinfo")
 
             google_id: str = user_info.get("sub")
             user_email: str = user_info.get("email")
 
-            existing_user: User | None = await user_service._get_user(
-                google_email=user_email,
-                is_verified=True,
+            existing_user: User | None = await self._user_service.get_existing_user(
+                user_email
             )
 
-            if existing_user:
-                existing_user.is_active = True
-                await user_service.update_user(existing_user, commit=True)
-            else:
+            """Link an existing email signup account"""
+
+            if existing_user and existing_user.email:
+                if not existing_user.is_verified:
+                    existing_user.email = None
+                    existing_user.hashed_password = None
+                    existing_user.is_verified = True
+
+                existing_user.google_id = google_id
+                existing_user.google_email = user_email
+
+                existing_user.updated_at = datetime.now(UTC)
+                await self._user_service.update_user(existing_user)
+
+            if not existing_user:
+                org = await self._organization_service.create_organization(
+                    OrganizationInDB(
+                        id=uuid7(),
+                        name=signup.organization_name,
+                        country=signup.organization_country,
+                    )
+                )
+
+                role_id: UUID | None = await self._role_service.select_role_id(
+                    name=Role.ADMIN
+                )
+
                 user = UserInDB(
                     id=uuid7(),
-                    type=UserType.GOOGLE,
                     is_active=True,
                     is_verified=True,
+                    role_id=role_id,
+                    organization_id=org.id,
                     google_id=google_id,
                     google_email=user_email,
                 )
-                await user_service.create_user(user, user_email, commit=True)
+                await self._user_service.create_user(user, user_email)
 
             user_id = existing_user.id if existing_user else user.id
 
-            # TODO: Replace once sign-up flow is completed
             if existing_user and existing_user.organization:
                 organization_id = existing_user.organization.id
             else:
                 organization_id = user.organization_id
+
+            await self._uow.commit()
 
             access_token, refresh_token = await self._get_tokens(
                 user_id, organization_id, security
@@ -298,6 +382,8 @@ class AuthService:
 
             return access_token, refresh_token
         except Exception as exc:
+            await self._uow.rollback()
+
             sentry_sdk.capture_exception(exc)
             sentry_logger.error("Error occurred while signing in with google account")
             raise ServerError() from exc
@@ -318,20 +404,33 @@ class AuthService:
             )
             raise InvalidOtpError()
 
-        await otp_service.verify_otp(existing_user.id, email_verify.otp_code)
+        await otp_service.verify_otp(
+            existing_user.id, email_verify.otp_purpose, email_verify.otp_code
+        )
 
         try:
-            existing_user.is_verified = True
+            if email_verify.otp_purpose == OtpPurpose.EMAIL_VERIFICATION:
+                existing_user.is_verified = True
+                err_msg = "Error occurred while trying to verify user {user_id} account"
+
+            if email_verify.otp_purpose == OtpPurpose.ACCOUNT_REACTIVATION:
+                existing_user.is_active = True
+                err_msg = (
+                    "Error occurred while trying to reactivate user {user_id} account"
+                )
+
+            existing_user.updated_at = datetime.now(UTC)
             await user_service.update_user(existing_user, commit=True)
 
             sentry_logger.info(
-                "User {user_id} account verification completed",
+                "User {user_id} {otp_purpose} completed",
                 user_id=existing_user.id,
+                otp_purpose=email_verify.otp_purpose,
             )
         except Exception as exc:
             sentry_sdk.capture_exception(exc)
             sentry_logger.error(
-                "Error occurred while trying to verify user {user_id} account",
+                err_msg,
                 user_id=existing_user.id,
             )
             raise ServerError() from exc
@@ -344,9 +443,15 @@ class AuthService:
     ):
         await self._uow_user_otp_email(uow)
 
-        existing_user: User | None = await self._user_service._get_user(
-            email=otp_resend.email, is_verified=False
-        )
+        filters = {"email": otp_resend.email}
+
+        if otp_resend.otp_purpose == OtpPurpose.EMAIL_VERIFICATION:
+            filters["is_verified"] = False
+
+        if otp_resend.otp_purpose == OtpPurpose.ACCOUNT_REACTIVATION:
+            filters["is_active"] = False
+
+        existing_user: User | None = await self._user_service._get_user(**filters)
 
         if not existing_user:
             sentry_logger.warning("User not found for resend otp")
@@ -356,9 +461,10 @@ class AuthService:
             await self._uow.commit()
             await self._send_email(
                 otp_service,
-                "Email Verification Code",
+                otp_resend.otp_purpose,
                 otp_resend.email,
                 existing_user.id,
+                otp_resend.otp_purpose,
             )
 
             sentry_logger.info(
@@ -380,7 +486,7 @@ class AuthService:
     ):
         user_email: str = email_login.email
         existing_user: User | None = await user_service._get_user(
-            email=user_email, type=UserType.EMAIL, is_verified=True
+            email=user_email, is_verified=True, is_active=True
         )
 
         if not existing_user:
@@ -397,10 +503,12 @@ class AuthService:
             )
             raise CredentialError()
 
-        existing_user.is_active = True
-        await user_service.update_user(existing_user, commit=True)
+        organization_id = (
+            existing_user.organization.id if existing_user.organization else None
+        )
+
         access_token, refresh_token = await self._get_tokens(
-            existing_user.id, existing_user.organization.id, security
+            existing_user.id, organization_id, security
         )
 
         sentry_logger.info(
@@ -436,7 +544,7 @@ class AuthService:
         user_id = claims.get("sub")
 
         existing_user: User | None = await user_service._get_user(
-            id=user_id, is_verified=True
+            id=user_id, is_verified=True, is_active=True
         )
 
         if not existing_user:
@@ -448,9 +556,13 @@ class AuthService:
                 details={"reason": "User not found"},
             )
 
+        organization_id = (
+            existing_user.organization.id if existing_user.organization else None
+        )
+
         token_data: TokenData = TokenData(
             user_id=user_id,
-            organization_id=existing_user.organization.id,
+            organization_id=organization_id,
             session_id=claims.get("sid"),
         )
         access_token, refresh_token_payload = await security.prepare_tokens(token_data)
@@ -496,37 +608,64 @@ class AuthService:
 
     async def get_current_user(
         self, curr_user: User
-    ) -> EmailUserResponse | GoogleUserResponse:
+    ) -> EmailUserResponse | GoogleUserResponse | UserResponse:
         sentry_logger.info("User {user_id} account retrieved", user_id=curr_user.id)
-        if curr_user.type == "email":
+        if curr_user.email:
             return EmailUserResponse.model_validate(curr_user)
-        else:
+        elif curr_user.google_email:
             return GoogleUserResponse.model_validate(curr_user)
+        else:
+            return UserResponse.model_validate(curr_user)
 
     async def logout(
         self,
         curr_user: User,
         refresh_token: str,
         security: Security,
-        user_service: UserService,
     ):
-        curr_user.is_active = False
-        await user_service.update_user(curr_user, commit=True)
-
         await self._revoke_session(refresh_token, security)
 
         sentry_logger.info(
             "User {user_id} account logout completed", user_id=curr_user.id
         )
 
-    async def delete_account(
+    async def deactivate_account(
         self,
         curr_user: User,
         user_service: UserService,
         refresh_token: str,
         security: Security,
     ):
-        await user_service.delete_user(curr_user)
+        curr_user.is_active = False
+        curr_user.updated_at = datetime.now(UTC)
+
+        await user_service.update_user(curr_user, commit=True)
         await self._revoke_all_sessions(refresh_token, security)
 
-        sentry_logger.info("User {user_id} account deleted", user_id=curr_user.id)
+        sentry_logger.info("User {user_id} account deactivated", user_id=curr_user.id)
+
+    async def reactivate_account(
+        self,
+        otp_service: OtpService,
+        user_service: UserService,
+        email_service: EmailService,
+        reactivate: ReactivateAccount,
+    ):
+        self._email_service = email_service
+
+        user: User | None = await user_service.get_user_for_reactivation(
+            reactivate.email
+        )
+
+        if user:
+            await self._send_email(
+                otp_service,
+                OtpPurpose.ACCOUNT_REACTIVATION,
+                user.email,
+                user.id,
+                OtpPurpose.ACCOUNT_REACTIVATION,
+            )
+
+            sentry_logger.info(
+                "Reactivation email sent for user {user_id}", user_id=user.id
+            )
