@@ -8,6 +8,11 @@ from fastapi.responses import JSONResponse
 from app.api.schemas.response import Error, ErrorResponse
 from app.core.enum import ErrorCode
 
+EXISTS_CODE = {
+    "user": ErrorCode.USER_EXISTS,
+    "employee": ErrorCode.EMPLOYEE_EXISTS
+}
+
 
 class AppException(Exception):
     """Base Exception class"""
@@ -85,12 +90,14 @@ class AuthorizationError(AppException):
         self.details = details
 
 
-class UserExistsError(AppException):
-    """User already exists"""
+class EntityExistsError(AppException):
+    """Entity already exists"""
 
-    def __init__(self, user_email: str):
-        super().__init__(ErrorCode.USER_EXISTS)
-        self.user_email = user_email
+    def __init__(self, entity: str, entity_property: str, entity_value: str):
+        super().__init__(EXISTS_CODE[entity.lower()])
+        self.entity = entity
+        self.entity_value = entity_value
+        self.entity_property = entity_property
 
 
 class NotFoundError(AppException):
@@ -127,6 +134,33 @@ class RateLimitExceeded(AppException):
         super().__init__(ErrorCode.RATE_LIMITED)
         self.retry_after = retry_after
         self.headers = {"Retry-After": str(retry_after)}
+
+
+class UserLinkedError(AppException):
+    def __init__(self):
+        super().__init__(ErrorCode.USER_ALREADY_LINKED)
+
+
+class UserDeactivatedError(AppException):
+    """User account is deactivated and must be reactivated"""
+
+    def __init__(self):
+        super().__init__(ErrorCode.USER_DEACTIVATED)
+
+
+class InvalidEmploymentPeriodError(AppException):
+    """Employment period dates are invalid or overlap another period"""
+
+    def __init__(self, reason: str = "end_date must be on or after start_date"):
+        super().__init__(ErrorCode.INVALID_EMPLOYMENT_PERIOD)
+        self.reason = reason
+
+
+class ActiveEmploymentPeriodError(AppException):
+    """A new period cannot start while the latest one has no end date"""
+
+    def __init__(self):
+        super().__init__(ErrorCode.ACTIVE_EMPLOYMENT_PERIOD)
 
 
 def create_exception_handler(

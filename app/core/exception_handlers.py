@@ -4,11 +4,14 @@ from fastapi.responses import JSONResponse
 
 from app.api.schemas.response import Error, ErrorResponse
 from app.core.exceptions import (
+    ActiveEmploymentPeriodError,
     AuthenticationError,
     AuthorizationError,
     CredentialError,
+    EntityExistsError,
     ErrorCode,
     GoogleSignInError,
+    InvalidEmploymentPeriodError,
     InvalidOtpError,
     NotFoundError,
     OauthSignInError,
@@ -16,7 +19,8 @@ from app.core.exceptions import (
     RateLimitExceeded,
     ServerError,
     ServiceUnavailable,
-    UserExistsError,
+    UserDeactivatedError,
+    UserLinkedError,
     create_exception_handler,
 )
 
@@ -113,12 +117,40 @@ class ExceptionHandler:
         )
 
         self._app.add_exception_handler(
-            exc_class_or_status_code=UserExistsError,
+            exc_class_or_status_code=EntityExistsError,
             handler=create_exception_handler(
                 status_code=409,
                 detail={
                     "status": "error",
-                    "message": "User already exists with the provided email {user_email}",
+                    "message": (
+                        "{entity} already exists with the provided"
+                        "{entity_property} {entity_value}"
+                    ),
+                },
+            ),
+        )
+
+        self._app.add_exception_handler(
+            exc_class_or_status_code=UserLinkedError,
+            handler=create_exception_handler(
+                status_code=409,
+                detail={
+                    "status": "error",
+                    "message": "User linked to an existing employee"
+                },
+            ),
+        )
+
+        self._app.add_exception_handler(
+            exc_class_or_status_code=UserDeactivatedError,
+            handler=create_exception_handler(
+                status_code=409,
+                detail={
+                    "status": "error",
+                    "message": (
+                        "This account is deactivated. Reactivate your account "
+                        "to continue."
+                    ),
                 },
             ),
         )
@@ -131,6 +163,31 @@ class ExceptionHandler:
                     "message": "Invalid otp received",
                 },
                 status_code=400,
+            ),
+        )
+
+        self._app.add_exception_handler(
+            exc_class_or_status_code=InvalidEmploymentPeriodError,
+            handler=create_exception_handler(
+                detail={
+                    "status": "error",
+                    "message": "{reason}",
+                },
+                status_code=400,
+            ),
+        )
+
+        self._app.add_exception_handler(
+            exc_class_or_status_code=ActiveEmploymentPeriodError,
+            handler=create_exception_handler(
+                detail={
+                    "status": "error",
+                    "message": (
+                        "An active employment period already exists. Update its "
+                        "end_date before creating a new one."
+                    ),
+                },
+                status_code=409,
             ),
         )
 
