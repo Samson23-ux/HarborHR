@@ -19,8 +19,6 @@ from app.api.schemas.auth import (
 )
 from app.api.schemas.response import SuccessResponse
 from app.api.schemas.user import (
-    EmailUserResponse,
-    GoogleUserResponse,
     UserResponse,
 )
 from app.core.config import get_settings
@@ -32,6 +30,7 @@ from app.core.exceptions import (
 )
 from app.deps import (
     AuthServiceDep,
+    CurrentActiveCachedUser,
     CurrentActiveUser,
     EmailServiceDep,
     OtpServiceDep,
@@ -58,7 +57,7 @@ def _secure_cookie() -> bool:
 @router.post(
     "/auth/signup",
     status_code=201,
-    response_model=SuccessResponse[SignUpResponse],
+    response_model=SuccessResponse[SignUpResponse | UserResponse],
     description=(
         "Sign up with email and password."
         "A verification code is sent to the user's email on completion"
@@ -73,13 +72,27 @@ async def sign_up_with_email(
     auth_service: AuthServiceDep,
     uow: UnitOfWorkRepo,
 ):
-    await auth_service.sign_up_with_email(signup, otp_service, security, uow)
-    return SuccessResponse(
-        message=(
-            "Sign up completed successfully."
-            "Check your email for verification code and instructions"
-        )
+    signup_response: UserResponse | None = await auth_service.sign_up_with_email(
+        signup, otp_service, security, uow
     )
+
+    if signup_response:
+        response = SuccessResponse(
+            message=(
+                "Sign up completed successfully. Your account has been linked to "
+                "your Google account. You can now sign in with your email and password"
+            ),
+            data=signup_response,
+        )
+    else:
+        response = SuccessResponse(
+            message=(
+                "Sign up completed successfully. "
+                "Check your email for verification code and instructions"
+            )
+        )
+
+    return response
 
 
 @router.post(
@@ -173,7 +186,7 @@ async def google_callback(
 @router.patch(
     "/auth/verify",
     status_code=200,
-    response_model=SuccessResponse[EmailUserResponse],
+    response_model=SuccessResponse,
     description="Verify account by submitting the received otp code",
     dependencies=[write_limiter],
 )
@@ -274,19 +287,15 @@ async def create_new_token(
     "/auth/me",
     status_code=200,
     description="Get current active user",
-    response_model=SuccessResponse[
-        EmailUserResponse | GoogleUserResponse | UserResponse
-    ],
+    response_model=SuccessResponse[UserResponse],
     dependencies=[read_limiter],
 )
 async def get_current_user(
     request: Request,
-    curr_user: CurrentActiveUser,
+    curr_user: CurrentActiveCachedUser,
     auth_service: AuthServiceDep,
 ):
-    user: (
-        EmailUserResponse | GoogleUserResponse | UserResponse
-    ) = await auth_service.get_current_user(curr_user)
+    user: UserResponse = await auth_service.get_current_user(curr_user)
     return SuccessResponse(message="User retrieved successfully", data=user)
 
 
@@ -300,7 +309,7 @@ async def get_current_user(
 async def log_out(
     request: Request,
     security: SecurityDep,
-    curr_user: CurrentActiveUser,
+    curr_user: CurrentActiveCachedUser,
     auth_service: AuthServiceDep,
 ):
     refresh_token: str | None = request.cookies.get("refresh_token")

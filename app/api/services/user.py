@@ -6,7 +6,7 @@ import sentry_sdk.logger as sentry_logger
 from app.api.models.user import User
 from app.api.repo.redis import RedisRepository
 from app.api.repo.user import UserRepository
-from app.api.schemas.user import UserInDB
+from app.api.schemas.user import CachedUser, UserInDB
 from app.core.config import get_settings
 from app.core.exceptions import NotFoundError, ServerError
 from app.serializers import _deserialize_cached_user, _serialize_user
@@ -23,9 +23,11 @@ class UserService:
     def _user_cache_key(user_id: UUID) -> str:
         return f"cache:user:{user_id!s}"
 
-    async def get_user(self, **filters) -> User:
+    async def get_user(self, with_role: bool = False, **filters) -> User:
         try:
-            user: User | None = await self._user_repo.get_record(**filters)
+            user: User | None = await self._user_repo.get_user_with_children(
+                with_role=with_role, **filters
+            )
 
             if not user:
                 sentry_logger.warning(
@@ -45,14 +47,23 @@ class UserService:
             )
             raise ServerError() from exc
 
-    async def _get_user(self, **filters) -> User | None:
-        return await self._user_repo.get_record(**filters)
+    async def _get_user(self, with_role: bool = False, **filters) -> User | None:
+        return await self._user_repo.get_user_with_children(
+            with_role=with_role, **filters
+        )
 
-    async def get_existing_user(self, email) -> User | None:
-        return await self._user_repo.get_existing_user(email)
-
-    async def get_user_for_reactivation(self, email: str) -> User | None:
-        return await self._user_repo.get_user_for_reactivation(email)
+    async def get_existing_user(
+        self,
+        email,
+        *,
+        is_active: bool | None = None,
+        with_role: bool = False,
+    ) -> User | None:
+        return await self._user_repo.get_existing_user(
+            email,
+            is_active=is_active,
+            with_role=with_role,
+        )
 
     async def create_user(
         self, user: UserInDB, email: str, commit: bool = False
@@ -76,7 +87,7 @@ class UserService:
             sentry_logger.error("Error occurred while creating user")
             raise ServerError() from exc
 
-    async def get_cached_user(self, **filters) -> User | None:
+    async def get_cached_user(self, **filters) -> CachedUser | None:
         cache_key: str = self._user_cache_key(filters.get("id"))
         cached: dict = await self._redis_repo.get_hset(cache_key)
 
@@ -119,18 +130,5 @@ class UserService:
             sentry_sdk.capture_exception(exc)
             sentry_logger.error(
                 "Error occurred while updating user {user_id}", user_id=user.id
-            )
-            raise ServerError() from exc
-
-    async def delete_user(self, user: User):
-        try:
-            await self._user_repo.delete(user)
-            await self._user_repo.commit()
-            await self.invalidate_user_cache(user)
-        except Exception as exc:
-            await self._user_repo.rollback()
-            sentry_sdk.capture_exception(exc)
-            sentry_logger.error(
-                "Error occurred while deleting user {user_id}", user_id=user.id
             )
             raise ServerError() from exc

@@ -23,8 +23,6 @@ from app.api.schemas.auth import (
 from app.api.schemas.email import EmailInDB
 from app.api.schemas.organization import OrganizationInDB
 from app.api.schemas.user import (
-    EmailUserResponse,
-    GoogleUserResponse,
     UserInDB,
     UserResponse,
 )
@@ -38,11 +36,12 @@ from app.core.enum import OtpPurpose, Role
 from app.core.exceptions import (
     AuthenticationError,
     CredentialError,
+    EntityExistsError,
     ErrorCode,
     InvalidOtpError,
     ServerError,
     TokenExpiredError,
-    UserExistsError,
+    UserDeactivatedError,
 )
 from app.core.security import Security
 from app.email_texts import verification_message
@@ -222,21 +221,34 @@ class AuthService:
         otp_service: OtpService,
         security: Security,
         uow: UnitOfWorkRepository,
-    ):
+    ) -> UserResponse | None:
         await self._uow_user_otp_email(uow)
 
         try:
             existing_user: User | None = await self._user_service.get_existing_user(
-                signup.email
+                signup.email, with_role=True
             )
 
-            if existing_user and existing_user.email and existing_user.is_verified:
-                sentry_logger.warning(
-                    "User {user_id} exists with the email provided for sign-up",
-                    user_id=existing_user.id,
-                )
-                raise UserExistsError(user_email=signup.email)
-        except UserExistsError:
+            if existing_user and existing_user.is_verified:
+                if not existing_user.is_active:
+                    sentry_logger.warning(
+                        "Deactivated user {user_id} attempted to sign up with the "
+                        "email provided",
+                        user_id=existing_user.id,
+                    )
+                    raise UserDeactivatedError()
+
+                if existing_user.email:
+                    sentry_logger.warning(
+                        "User {user_id} exists with the email provided for sign-up",
+                        user_id=existing_user.id,
+                    )
+                    raise EntityExistsError(
+                        entity="User",
+                        entity_property="email",
+                        entity_value=signup.email,
+                    )
+        except EntityExistsError, UserDeactivatedError:
             raise
         except Exception as exc:
             sentry_sdk.capture_exception(exc)
@@ -284,17 +296,21 @@ class AuthService:
             user_id = existing_user.id if existing_user else user.id
 
             await self._uow.commit()
+            sentry_logger.info(
+                "Email and password sign-up completed for user {user_id}",
+                user_id=user_id,
+            )
+
+            if existing_user and existing_user.google_email:
+                existing_user = await self._user_service.get_existing_user(signup.email)
+                return UserResponse.model_validate(existing_user)
+
             await self._send_email(
                 otp_service,
                 OtpPurpose.EMAIL_VERIFICATION,
                 signup.email,
                 user_id,
                 OtpPurpose.EMAIL_VERIFICATION,
-            )
-
-            sentry_logger.info(
-                "Email and password sign-up completed for user {user_id}",
-                user_id=user_id,
             )
         except Exception as exc:
             await self._uow.rollback()
@@ -321,22 +337,31 @@ class AuthService:
             user_email: str = user_info.get("email")
 
             existing_user: User | None = await self._user_service.get_existing_user(
-                user_email
+                user_email, with_role=True
             )
 
             """Link an existing email signup account"""
 
-            if existing_user and existing_user.email:
-                if not existing_user.is_verified:
-                    existing_user.email = None
-                    existing_user.hashed_password = None
-                    existing_user.is_verified = True
+            if existing_user:
+                if not existing_user.is_active:
+                    sentry_logger.warning(
+                        "Deactivated user {user_id} attempted to sign up with the "
+                        "email provided",
+                        user_id=existing_user.id,
+                    )
+                    raise UserDeactivatedError()
 
-                existing_user.google_id = google_id
-                existing_user.google_email = user_email
+                if existing_user.email:
+                    if not existing_user.is_verified:
+                        existing_user.email = None
+                        existing_user.hashed_password = None
+                        existing_user.is_verified = True
 
-                existing_user.updated_at = datetime.now(UTC)
-                await self._user_service.update_user(existing_user)
+                    existing_user.google_id = google_id
+                    existing_user.google_email = user_email
+
+                    existing_user.updated_at = datetime.now(UTC)
+                    await self._user_service.update_user(existing_user)
 
             if not existing_user:
                 org = await self._organization_service.create_organization(
@@ -364,10 +389,9 @@ class AuthService:
 
             user_id = existing_user.id if existing_user else user.id
 
-            if existing_user and existing_user.organization:
-                organization_id = existing_user.organization.id
-            else:
-                organization_id = user.organization_id
+            organization_id = (
+                existing_user.organization_id if existing_user else user.organization_id
+            )
 
             await self._uow.commit()
 
@@ -395,7 +419,7 @@ class AuthService:
         email_verify: EmailVerify,
     ):
         existing_user: User | None = await user_service._get_user(
-            email=email_verify.email
+            email=email_verify.email, with_role=True
         )
 
         if not existing_user:
@@ -503,12 +527,8 @@ class AuthService:
             )
             raise CredentialError()
 
-        organization_id = (
-            existing_user.organization.id if existing_user.organization else None
-        )
-
         access_token, refresh_token = await self._get_tokens(
-            existing_user.id, organization_id, security
+            existing_user.id, existing_user.organization_id, security
         )
 
         sentry_logger.info(
@@ -556,13 +576,9 @@ class AuthService:
                 details={"reason": "User not found"},
             )
 
-        organization_id = (
-            existing_user.organization.id if existing_user.organization else None
-        )
-
         token_data: TokenData = TokenData(
             user_id=user_id,
-            organization_id=organization_id,
+            organization_id=existing_user.organization_id,
             session_id=claims.get("sid"),
         )
         access_token, refresh_token_payload = await security.prepare_tokens(token_data)
@@ -606,16 +622,9 @@ class AuthService:
 
         return access_token, refresh_token_payload.get("refresh_token")
 
-    async def get_current_user(
-        self, curr_user: User
-    ) -> EmailUserResponse | GoogleUserResponse | UserResponse:
+    async def get_current_user(self, curr_user: User) -> UserResponse:
         sentry_logger.info("User {user_id} account retrieved", user_id=curr_user.id)
-        if curr_user.email:
-            return EmailUserResponse.model_validate(curr_user)
-        elif curr_user.google_email:
-            return GoogleUserResponse.model_validate(curr_user)
-        else:
-            return UserResponse.model_validate(curr_user)
+        return UserResponse.model_validate(curr_user)
 
     async def logout(
         self,
@@ -653,8 +662,8 @@ class AuthService:
     ):
         self._email_service = email_service
 
-        user: User | None = await user_service.get_user_for_reactivation(
-            reactivate.email
+        user: User | None = await user_service.get_existing_user(
+            reactivate.email, is_active=False
         )
 
         if user:
