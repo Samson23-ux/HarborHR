@@ -1,5 +1,5 @@
 from app.api.models.email import Email
-from app.api.models.employees import (
+from app.api.models.employee import (
     Employee,
     EmployeeLog,
     EmployeePay,

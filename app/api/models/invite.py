@@ -56,7 +56,7 @@ class Invite(Base):
         PrimaryKeyConstraint("id", name="invites_pk"),
         Index(
             "idx_invites_active",
-            employee_id,
+            "employee_id",
             unique=True,
             postgresql_where=(status == InviteStatus.ACTIVE),
         ),

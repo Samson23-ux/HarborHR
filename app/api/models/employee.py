@@ -9,6 +9,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     PrimaryKeyConstraint,
@@ -18,7 +19,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, ExcludeConstraint
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.api.models.base import Base
 
@@ -44,7 +45,28 @@ class Employee(Base):
         DateTime(timezone=True), default=lambda: datetime.now(UTC)
     )
 
-    __table_args__ = (PrimaryKeyConstraint("id", name="employees_pk"),)
+    __table_args__ = (
+        PrimaryKeyConstraint("id", name="employees_pk"),
+        Index("idx_employees_org_id", "organization_id"),
+        Index("idx_employees_is_active", "is_active"),
+        Index(
+            "idx_employees_first_name",
+            "first_name",
+            postgresql_using="gin",
+            postgresql_ops={"first_name": "gin_trgm_ops"},
+        ),
+        Index(
+            "idx_employees_last_name",
+            "last_name",
+            postgresql_using="gin",
+            postgresql_ops={"last_name": "gin_trgm_ops"},
+        ),
+    )
+
+    employment_periods: Mapped[list[EmploymentPeriod]] = relationship(
+        "EmploymentPeriod", viewonly=True
+    )
+    employee_pay: Mapped[list[EmployeePay]] = relationship("EmployeePay", viewonly=True)
 
 
 class EmploymentPeriod(Base):
@@ -75,12 +97,13 @@ class EmploymentPeriod(Base):
 
     __table_args__ = (
         PrimaryKeyConstraint("id", name="employment_periods_pk"),
+        Index("idx_employment_periods_org_id", "organization_id"),
         CheckConstraint(
             "end_date IS NULL OR end_date >= start_date", name="ck_employment_period"
         ),
         ExcludeConstraint(
-            (employee_id, "="),
-            (func.daterange(start_date, end_date, "[)"), "&&"),
+            ("employee_id", "="),
+            (func.daterange("start_date", "end_date", "[)"), "&&"),
             using="gist",
             name="employment_period_ex",
         ),
@@ -126,8 +149,11 @@ class EmployeePay(Base):
 
     __table_args__ = (
         PrimaryKeyConstraint("id", name="employee_pay_pk"),
-        UniqueConstraint(employee_id, version, name="pay_version_unique"),
-        UniqueConstraint(employee_id, effective_from, name="pay_effective_from_unique"),
+        Index("idx_employee_pay_org_id", "organization_id"),
+        UniqueConstraint("employee_id", "version", name="pay_version_unique"),
+        UniqueConstraint(
+            "employee_id", "effective_from", name="pay_effective_from_unique"
+        ),
     )
 
 

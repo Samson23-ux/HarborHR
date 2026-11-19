@@ -20,7 +20,6 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.api.models.base import Base
 
 if TYPE_CHECKING:
-    from app.api.models.organization import Organization
     from app.api.models.role import Role
 
 
@@ -55,10 +54,7 @@ class User(Base):
         DateTime(timezone=True), default=lambda: datetime.now(UTC)
     )
 
-    role: Mapped[Role] = relationship("Role", viewonly=True, lazy="selectin")
-    organization: Mapped[Organization | None] = relationship(
-        "Organization", viewonly=True, lazy="selectin"
-    )
+    role: Mapped[Role] = relationship("Role", viewonly=True)
 
     __table_args__ = (
         PrimaryKeyConstraint("id", name="users_pk"),
@@ -69,9 +65,9 @@ class User(Base):
             """,
             name="users_auth_ck",
         ),
-        Index("idx_users_email", email),
-        Index("idx_users_role_id", role_id),
-        Index("idx_users_employee_id", employee_id),
-        Index("idx_users_google_email", google_email),
-        Index("idx_users_organization_id", organization_id),
+        Index("idx_users_email", "email"),
+        Index("idx_users_role_id", "role_id"),
+        Index("idx_users_employee_id", "employee_id"),
+        Index("idx_users_google_email", "google_email"),
+        Index("idx_users_organization_id", "organization_id"),
     )
