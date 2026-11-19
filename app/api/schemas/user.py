@@ -3,6 +3,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr
 
+from app.core.enum import Role
+
 
 class UserBase(BaseModel):
     id: UUID
@@ -41,14 +43,19 @@ class BaseResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
-class GoogleUserResponse(GoogleUser, BaseResponse):
-    google_id: str
-    google_email: EmailStr
-
-
-class EmailUserResponse(EmailUser, BaseResponse):
-    email: EmailStr
-
-
 class UserResponse(EmailUser, GoogleUser, BaseResponse):
     pass
+
+
+class CachedUser(BaseModel):
+    id: UUID
+    role: Role
+    email: EmailStr | None
+    google_id: str | None
+    google_email: EmailStr | None
+    employee_id: UUID | None = None
+    organization_id: UUID | None = None
+    is_active: bool
+    is_verified: bool
+    updated_at: datetime | None
+    created_at: datetime
