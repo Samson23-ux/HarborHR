@@ -1,9 +1,11 @@
 from fastapi import APIRouter
 
-from app.api.routers import auth
+from app.api.routers import auth, employee, organization
 from app.core.config import get_settings
 
 SETTINGS = get_settings()
 
 router = APIRouter(prefix=SETTINGS.API_PREFIX)
 router.include_router(auth.router, tags=["Auth"])
+router.include_router(employee.router, tags=["Employee"])
+router.include_router(organization.router, tags=["Organization"])

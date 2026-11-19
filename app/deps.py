@@ -8,13 +8,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.models.user import User
 from app.api.repo.email import EmailRepository
+from app.api.repo.employee import EmployeeRepository
+from app.api.repo.employee_pay import EmployeePayRepository
+from app.api.repo.employment_period import EmploymentPeriodRepository
 from app.api.repo.organization import OrganizationRepository
 from app.api.repo.redis import RedisRepository
 from app.api.repo.role import RoleRepository
 from app.api.repo.uow import UnitOfWorkRepository
 from app.api.repo.user import UserRepository
+from app.api.schemas.user import CachedUser
 from app.api.services.auth import AuthService
 from app.api.services.email import EmailService
+from app.api.services.employee import EmployeeService
+from app.api.services.employee_pay import EmployeePayService
+from app.api.services.employment_period import EmploymentPeriodService
 from app.api.services.organization import OrganizationService
 from app.api.services.otp import OtpService
 from app.api.services.role import RoleService
@@ -72,6 +79,20 @@ async def get_email_repo(session: DBSession) -> EmailRepository:
     return EmailRepository(async_session=session)
 
 
+async def get_employee_repo(session: DBSession) -> EmployeeRepository:
+    return EmployeeRepository(async_session=session)
+
+
+async def get_employment_period_repo(
+    session: DBSession,
+) -> EmploymentPeriodRepository:
+    return EmploymentPeriodRepository(async_session=session)
+
+
+async def get_employee_pay_repo(session: DBSession) -> EmployeePayRepository:
+    return EmployeePayRepository(async_session=session)
+
+
 async def get_organization_repo(session: DBSession) -> OrganizationRepository:
     return OrganizationRepository(async_session=session)
 
@@ -87,6 +108,11 @@ async def get_unit_of_work(session: DBSession) -> UnitOfWorkRepository:
 UserRepo = Annotated[UserRepository, Depends(get_user_repo)]
 RedisRepo = Annotated[RedisRepository, Depends(get_redis_repo)]
 EmailRepo = Annotated[EmailRepository, Depends(get_email_repo)]
+EmployeeRepo = Annotated[EmployeeRepository, Depends(get_employee_repo)]
+EmploymentPeriodRepo = Annotated[
+    EmploymentPeriodRepository, Depends(get_employment_period_repo)
+]
+EmployeePayRepo = Annotated[EmployeePayRepository, Depends(get_employee_pay_repo)]
 OrganizationRepo = Annotated[OrganizationRepository, Depends(get_organization_repo)]
 RoleRepo = Annotated[RoleRepository, Depends(get_role_repo)]
 UnitOfWorkRepo = Annotated[UnitOfWorkRepository, Depends(get_unit_of_work)]
@@ -96,6 +122,22 @@ UnitOfWorkRepo = Annotated[UnitOfWorkRepository, Depends(get_unit_of_work)]
 
 async def get_user_service(user_repo: UserRepo, redis_repo: RedisRepo) -> UserService:
     return UserService(user_repo=user_repo, redis_repo=redis_repo)
+
+
+async def get_employee_service(employee_repo: EmployeeRepo) -> EmployeeService:
+    return EmployeeService(employee_repo=employee_repo)
+
+
+async def get_employment_period_service(
+    employment_period_repo: EmploymentPeriodRepo,
+) -> EmploymentPeriodService:
+    return EmploymentPeriodService(employment_period_repo=employment_period_repo)
+
+
+async def get_employee_pay_service(
+    employee_pay_repo: EmployeePayRepo,
+) -> EmployeePayService:
+    return EmployeePayService(employee_pay_repo=employee_pay_repo)
 
 
 async def get_email_service(email_repo: EmailRepo) -> EmailService:
@@ -124,6 +166,11 @@ OtpServiceDep = Annotated[OtpService, Depends(get_otp_service)]
 AuthServiceDep = Annotated[AuthService, Depends(get_auth_service)]
 UserServiceDep = Annotated[UserService, Depends(get_user_service)]
 EmailServiceDep = Annotated[EmailService, Depends(get_email_service)]
+EmployeeServiceDep = Annotated[EmployeeService, Depends(get_employee_service)]
+EmploymentPeriodServiceDep = Annotated[
+    EmploymentPeriodService, Depends(get_employment_period_service)
+]
+EmployeePayServiceDep = Annotated[EmployeePayService, Depends(get_employee_pay_service)]
 OrganizationServiceDep = Annotated[
     OrganizationService, Depends(get_organization_service)
 ]
@@ -168,7 +215,9 @@ async def get_current_user(
     user_service: UserServiceDep,
     claims: AccessTokenClaims,
 ) -> User:
-    user: User = await user_service.get_user(id=claims.get("sub"), is_verified=True)
+    user: User = await user_service.get_user(
+        id=claims.get("sub"), with_role=True, is_verified=True
+    )
     return user
 
 
@@ -187,25 +236,27 @@ async def get_current_active_user(curr_user: CurrentUser):
 CurrentActiveUser = Annotated[User, Depends(get_current_active_user)]
 
 
-async def get_cached_current_user(
+async def get_current_cached_user(
     user_service: UserServiceDep,
     claims: AccessTokenClaims,
 ):
     filters: dict = {"id": claims.get("sub")}
-    user: User = await user_service.get_cached_user(**filters)
+    user: CachedUser | None = await user_service.get_cached_user(**filters)
 
     if not user:
         filters["is_verified"] = True
-        user = await user_service.get_user(**filters)
+        user = await user_service.get_user(
+            with_role=True, **filters
+        )
 
         await user_service.cache_user(user)
     return user
 
 
-CachedCurrentUser = Annotated[User, Depends(get_cached_current_user)]
+CurrentCachedUser = Annotated[CachedUser | User, Depends(get_current_cached_user)]
 
 
-async def get_current_active_cached_user(cached_user: CachedCurrentUser):
+async def get_current_active_cached_user(cached_user: CurrentCachedUser):
     if cached_user.is_active is False:
         sentry_logger.warning("User {user_id} is inactive", user_id=cached_user.id)
         raise AuthorizationError(
@@ -219,14 +270,11 @@ CurrentActiveCachedUser = Annotated[User, Depends(get_current_active_cached_user
 
 def require_roles(roles: list[Role]):
     async def role_checker(active_user: CurrentActiveCachedUser):
-        if active_user.role not in roles:
+        if active_user.role.name not in roles:
             raise AuthorizationError(code=ErrorCode.NOT_PERMITTED)
         return active_user
 
     return role_checker
-
-
-RequireRole = Annotated[User, Depends(require_roles)]
 
 
 # ------------------------ Limiter -------------------------------- #
