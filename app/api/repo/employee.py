@@ -1,0 +1,113 @@
+from datetime import datetime
+
+from sqlalchemy import or_, select
+from sqlalchemy.dialects.postgresql import insert
+
+from app.api.models.employee import Employee
+from app.api.repo.base import BaseRepository
+from app.api.schemas.employee import Base as EmployeeBase
+from app.api.schemas.employee import EmployeeInDb, EmployeeListQuery
+
+
+class EmployeeRepository(BaseRepository[EmployeeBase, Employee]):
+    model = Employee
+
+    SORT_FIELDS = ["first_name", "last_name", "created_at", "updated_at"]  # noqa: RUF012
+
+    def _entity_to_model(self, entity):
+        return Employee(**entity.model_dump())
+
+    def _get_filters(self, **filters):
+        filter_conditions = []
+
+        if "id" in filters:
+            filter_conditions.append(self.model.id == filters["id"])
+        if "email" in filters:
+            filter_conditions.append(self.model.email == filters["email"])
+        if "is_active" in filters:
+            filter_conditions.append(self.model.is_active.is_(filters["is_active"]))
+        if "organization_id" in filters:
+            filter_conditions.append(
+                self.model.organization_id == filters["organization_id"]
+            )
+
+        return filter_conditions
+
+    def _get_sort_fields(self, sort):
+        sortable_fields = {
+            "first_name": self.model.first_name,
+            "last_name": self.model.last_name,
+            "created_at": self.model.created_at,
+            "updated_at": self.model.updated_at,
+        }
+
+        column = sortable_fields.get(sort)
+
+        if not column:
+            sort_field = "created_at"
+            column = self.model.created_at
+        else:
+            sort_field = sort
+
+        return self.SORT_FIELDS, column, sort_field
+
+    def _parse_cursor_value(self, val):
+        is_valid = True
+
+        if isinstance(val, str) and val.endswith("+00:00"):
+            try:
+                val = datetime.fromisoformat(val)
+            except ValueError, TypeError:
+                is_valid = False
+
+        return is_valid, val
+
+    async def create_employee(self, employee: EmployeeInDb) -> Employee | None:
+        res = await self.async_session.execute(
+            insert(self.model)
+            .values(**employee.model_dump())
+            .on_conflict_do_nothing(index_elements=["email"])
+            .returning(self.model)
+        )
+
+        return res.scalar()
+
+    async def get_employees(
+        self, details: bool, list_query: EmployeeListQuery, **filters
+    ) -> dict:
+        filter_conditions = self._get_filters(**filters)
+        stmt = select(self.model).where(*filter_conditions)
+
+        if details:
+            stmt = stmt.options(self.model.employment_periods).options(
+                self.model.employee_pay
+            )
+
+        return await self.sort_and_paginate(stmt, list_query)
+
+    async def get_employee_with_details(self, **filters) -> Employee | None:
+        filter_conditions = self._get_filters(**filters)
+
+        stmt = (
+            select(self.model)
+            .where(*filter_conditions, self.model.is_active.is_(True))
+            .options(self.model.employment_periods)
+            .options(self.model.employee_pay)
+        )
+
+        res = await self.async_session.execute(stmt)
+        return res.scalar()
+
+    async def search_employees(self, q: str, list_query: EmployeeListQuery, **filters):
+        q = self._escape_search_param(q)
+        filter_conditions = self._get_filters(**filters)
+
+        stmt = select(self.model).where(
+            *filter_conditions,
+            or_(
+                self.model.first_name.ilike(q, escape=self.LIKE_ESCAPE),
+                self.model.last_name.ilike(q, escape=self.LIKE_ESCAPE),
+            ),
+        )
+
+        return await self.sort_and_paginate(stmt, list_query)

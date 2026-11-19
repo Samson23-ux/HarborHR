@@ -8,11 +8,12 @@ from typing import Any, TypeVar
 from uuid import UUID
 
 from pydantic import BaseModel
-from sqlalchemy import asc, desc, select, text, tuple_, update
+from sqlalchemy import Select, asc, desc, select, text, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from app.api.models.base import Base
+from app.api.schemas.pagination import ListQuery
 
 Entity = TypeVar("Entity", bound=BaseModel)
 SqlAlchemyModel = TypeVar("SqlAlchemyModel", bound=Base)
@@ -28,6 +29,7 @@ class BaseRepository[Entity: BaseModel, SqlAlchemyModel: Base](ABC):
         self._async_session = async_session
 
     model: type[SqlAlchemyModel]
+    LIKE_ESCAPE = "\\"
 
     # Narrow Session | None to Session: fail loudly on a misconfigured repo
     # instead of an opaque "'NoneType' has no attribute" deep in a query.
@@ -57,16 +59,25 @@ class BaseRepository[Entity: BaseModel, SqlAlchemyModel: Base](ABC):
     def sync_session(self, session: Session | None):
         self._sync_session = session
 
-    async def set_org_id_async(self, org_id: UUID):
-        await self._async_session.execute(
-            text("SELECT set_config('app.current_org', :org, true)"),
-            {"org": str(org_id)},
+    def _escape_search_param(self, q: str):
+        escaped: str = (
+            q.replace(self.LIKE_ESCAPE, self.LIKE_ESCAPE * 2)
+            .replace("%", self.LIKE_ESCAPE + "%")
+            .replace("_", self.LIKE_ESCAPE + "_")
         )
 
-    def set_org_id_sync(self, org_id: UUID):
+        return f"%{escaped}%"
+
+    async def set_org_id_async(self, org_id: UUID | None):
+        await self._async_session.execute(
+            text("SELECT set_config('app.current_org', :org, true)"),
+            {"org": str(org_id) if org_id else ""},
+        )
+
+    def set_org_id_sync(self, org_id: UUID | None):
         self._sync_session.execute(
             text("SELECT set_config('app.current_org', :org, true)"),
-            {"org": str(org_id)},
+            {"org": str(org_id) if org_id else ""},
         )
 
     def add(
@@ -147,21 +158,13 @@ class BaseRepository[Entity: BaseModel, SqlAlchemyModel: Base](ABC):
         ):
             return
 
-    async def get_records(
-        self,
-        limit: int,
-        sort: str | None = None,
-        cursor: str | None = None,
-        **filters,
-    ) -> dict:
-        """sort is a field name, prefixed with "-" for descending (e.g. "-created_at")"""
-        order, sort = self._parse_sort(sort)
-
-        filter_conditions: list[Any] = self._get_filters(**filters)
+    async def sort_and_paginate(self, stmt: Select, list_query: ListQuery) -> dict:
+        # sort is a field name, prefixed with "-" for descending (e.g. "-created_at")
+        order, sort = self._parse_sort(list_query.sort)
         sort_fields, sort_column, sort_field = self._get_sort_fields(sort)
 
         cursor_payload: dict = await self.decode_cursor(
-            cursor, sort_field, order, sort_fields
+            list_query.cursor, sort_field, order, sort_fields
         )
 
         order_by_columns = []
@@ -170,18 +173,13 @@ class BaseRepository[Entity: BaseModel, SqlAlchemyModel: Base](ABC):
             """get records from the first record in db"""
 
             if order == "desc":
-                order_by_columns.append(desc(sort_column))
+                order_by_columns.append(desc(sort_column).nulls_last())
                 order_by_columns.append(desc(self.model.id))
             else:
-                order_by_columns.append(asc(sort_column))
+                order_by_columns.append(asc(sort_column).nulls_last())
                 order_by_columns.append(asc(self.model.id))
 
-            stmt = (
-                select(self.model)
-                .where(*filter_conditions)
-                .order_by(*order_by_columns)
-                .limit(limit + 1)
-            )
+            stmt = stmt.order_by(*order_by_columns).limit(list_query.limit + 1)
         else:
             """continue with the last record viewed"""
 
@@ -192,31 +190,30 @@ class BaseRepository[Entity: BaseModel, SqlAlchemyModel: Base](ABC):
             column_tuple = tuple_(getattr(self.model, cursor_sort_field), self.model.id)
 
             if cursor_payload["order"] == "desc":
-                order_by_columns.append(desc(sort_column))
+                order_by_columns.append(desc(sort_column).nulls_last())
                 order_by_columns.append(desc(self.model.id))
 
                 page_filter = column_tuple < tuple_(cursor_sort_value, cursor_last_id)
             else:
-                order_by_columns.append(asc(sort_column))
+                order_by_columns.append(asc(sort_column).nulls_last())
                 order_by_columns.append(asc(self.model.id))
 
                 page_filter = column_tuple > tuple_(cursor_sort_value, cursor_last_id)
 
             stmt = (
-                select(self.model)
-                .where(*filter_conditions, page_filter)
+                stmt.where(page_filter)
                 .order_by(*order_by_columns)
-                .limit(limit + 1)
+                .limit(list_query.limit + 1)
             )
 
         res = await self.async_session.execute(stmt)
         records = res.scalars().all()
 
-        has_more: bool = len(records) > limit
+        has_more: bool = len(records) > list_query.limit
 
         next_cursor = None
         if records:
-            sort_value = getattr(records[:limit][-1], sort_field)
+            sort_value = getattr(records[: list_query.limit][-1], sort_field)
 
             if isinstance(sort_value, datetime):
                 sort_value = sort_value.isoformat()
@@ -224,12 +221,15 @@ class BaseRepository[Entity: BaseModel, SqlAlchemyModel: Base](ABC):
             payload: dict = {
                 "sort_field": sort_field,
                 "sort_value": sort_value,
-                "last_id": str(records[:limit][-1].id),
+                "last_id": str(records[: list_query.limit][-1].id),
                 "order": order,
             }
             next_cursor: str = await self.encode_cursor(payload)
 
-        return {"data": records[:limit], "cursor": next_cursor if has_more else None}
+        return {
+            "data": records[: list_query.limit],
+            "cursor": next_cursor if has_more else None,
+        }
 
     async def get_record(self, **filters) -> SqlAlchemyModel | None:
         filter_conditions: list[Any] = self._get_filters(**filters)
