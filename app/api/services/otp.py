@@ -1,5 +1,3 @@
-import hashlib
-import hmac
 import secrets
 from uuid import UUID
 
@@ -9,12 +7,14 @@ import sentry_sdk.logger as sentry_logger
 from app.api.repo.redis import RedisRepository
 from app.core.config import get_settings
 from app.core.exceptions import InvalidOtpError, OtpAttemptsExceededError, ServerError
+from app.core.security import Security
 
 SETTINGS = get_settings()
 
 
 class OtpService:
-    def __init__(self, redis_repo: RedisRepository):
+    def __init__(self, security: Security, redis_repo: RedisRepository):
+        self._security = security
         self._redis_repo = redis_repo
 
     @staticmethod
@@ -22,9 +22,7 @@ class OtpService:
         return f"otp:{user_id!s}:{otp_purpose}"
 
     def _hash_otp(self, otp: str) -> str:
-        return hmac.new(
-            SETTINGS.OTP_SECRET_KEY.encode(), otp.encode(), hashlib.sha256
-        ).hexdigest()
+        return self._security.hash_value_256(otp, SETTINGS.OTP_SECRET_KEY)
 
     @staticmethod
     def _otp_expire() -> int:

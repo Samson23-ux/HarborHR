@@ -19,6 +19,8 @@ class OrganizationRepository(BaseRepository[OrganizationBase, Organization]):
 
         if "id" in filters:
             filter_conditions.append(self.model.id == filters["id"])
+        if "owner" in filters:
+            filter_conditions.append(self.model.id == filters["owner"])
         if "name" in filters:
             filter_conditions.append(self.model.name == filters["name"])
         if "organization_code" in filters:

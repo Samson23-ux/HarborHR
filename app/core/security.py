@@ -1,3 +1,5 @@
+import hashlib
+import hmac
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -55,6 +57,9 @@ class Security:
                 "scope": "openid email",
             },
         )
+
+    def hash_value_256(self, value: str, key: str) -> str:
+        return hmac.new(key.encode(), value.encode(), hashlib.sha256).hexdigest()
 
     async def hash_password(self, password: str) -> str:
         password = password + self.SETTINGS.ARGON2_PASSWORD_PEPPER

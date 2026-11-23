@@ -1,14 +1,15 @@
-from uuid import UUID
+from uuid import UUID, uuid7
 
 import sentry_sdk
 import sentry_sdk.logger as sentry_logger
 
+from app.api.models.invite import Invite
 from app.api.models.user import User
 from app.api.repo.redis import RedisRepository
 from app.api.repo.user import UserRepository
 from app.api.schemas.user import CachedUser, UserInDB
 from app.core.config import get_settings
-from app.core.exceptions import NotFoundError, ServerError
+from app.core.exceptions import InviteUserExistsError, NotFoundError, ServerError
 from app.serializers import _deserialize_cached_user, _serialize_user
 
 SETTINGS = get_settings()
@@ -58,11 +59,13 @@ class UserService:
         *,
         is_active: bool | None = None,
         with_role: bool = False,
+        with_lock: bool = False,
     ) -> User | None:
         return await self._user_repo.get_existing_user(
             email,
             is_active=is_active,
             with_role=with_role,
+            with_lock=with_lock,
         )
 
     async def create_user(
@@ -132,3 +135,29 @@ class UserService:
                 "Error occurred while updating user {user_id}", user_id=user.id
             )
             raise ServerError() from exc
+
+    async def link_user(self, invite: Invite, hashed_password: str):
+        existing_user: User | None = await self.get_existing_user(
+            invite.employee.email, with_lock=True
+        )
+
+        if existing_user:
+            sentry_logger.warning(
+                "User {user_id} exists for the invited employee {employee_id}",
+                user_id=existing_user.id,
+                employee_id=invite.employee.id,
+            )
+            raise InviteUserExistsError()
+
+        user: UserInDB = UserInDB(
+            id=uuid7(),
+            role_id=invite.employee.role_id,
+            employee_id=invite.employee.id,
+            organization_id=invite.organization_id,
+            is_active=True,
+            is_verified=True,
+            email=invite.employee.email,
+            hashed_password=hashed_password
+        )
+
+        self._user_repo.add(entity=user)

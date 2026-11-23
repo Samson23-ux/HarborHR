@@ -11,6 +11,7 @@ from app.api.repo.email import EmailRepository
 from app.api.repo.employee import EmployeeRepository
 from app.api.repo.employee_pay import EmployeePayRepository
 from app.api.repo.employment_period import EmploymentPeriodRepository
+from app.api.repo.invite import InviteRepository
 from app.api.repo.organization import OrganizationRepository
 from app.api.repo.redis import RedisRepository
 from app.api.repo.role import RoleRepository
@@ -22,6 +23,7 @@ from app.api.services.email import EmailService
 from app.api.services.employee import EmployeeService
 from app.api.services.employee_pay import EmployeePayService
 from app.api.services.employment_period import EmploymentPeriodService
+from app.api.services.invite import InviteService
 from app.api.services.organization import OrganizationService
 from app.api.services.otp import OtpService
 from app.api.services.role import RoleService
@@ -97,6 +99,10 @@ async def get_organization_repo(session: DBSession) -> OrganizationRepository:
     return OrganizationRepository(async_session=session)
 
 
+async def get_invite_repo(session: DBSession) -> InviteRepository:
+    return InviteRepository(async_session=session)
+
+
 async def get_role_repo(session: DBSession) -> RoleRepository:
     return RoleRepository(async_session=session)
 
@@ -114,6 +120,7 @@ EmploymentPeriodRepo = Annotated[
 ]
 EmployeePayRepo = Annotated[EmployeePayRepository, Depends(get_employee_pay_repo)]
 OrganizationRepo = Annotated[OrganizationRepository, Depends(get_organization_repo)]
+InviteRepo = Annotated[InviteRepository, Depends(get_invite_repo)]
 RoleRepo = Annotated[RoleRepository, Depends(get_role_repo)]
 UnitOfWorkRepo = Annotated[UnitOfWorkRepository, Depends(get_unit_of_work)]
 
@@ -124,8 +131,10 @@ async def get_user_service(user_repo: UserRepo, redis_repo: RedisRepo) -> UserSe
     return UserService(user_repo=user_repo, redis_repo=redis_repo)
 
 
-async def get_employee_service(employee_repo: EmployeeRepo) -> EmployeeService:
-    return EmployeeService(employee_repo=employee_repo)
+async def get_employee_service(
+    employee_repo: EmployeeRepo, redis_repo: RedisRepo
+) -> EmployeeService:
+    return EmployeeService(employee_repo=employee_repo, redis_repo=redis_repo)
 
 
 async def get_employment_period_service(
@@ -154,12 +163,20 @@ async def get_role_service(role_repo: RoleRepo) -> RoleService:
     return RoleService(role_repo=role_repo)
 
 
+async def get_invite_service(
+    security: SecurityDep, invite_repo: InviteRepo, redis_repo: RedisRepo
+) -> InviteService:
+    return InviteService(
+        security=security, invite_repo=invite_repo, redis_repo=redis_repo
+    )
+
+
 async def get_auth_service(redis_repo: RedisRepo) -> AuthService:
     return AuthService(redis_repo=redis_repo)
 
 
-async def get_otp_service(redis_repo: RedisRepo) -> OtpService:
-    return OtpService(redis_repo=redis_repo)
+async def get_otp_service(security: SecurityDep, redis_repo: RedisRepo) -> OtpService:
+    return OtpService(security=security, redis_repo=redis_repo)
 
 
 OtpServiceDep = Annotated[OtpService, Depends(get_otp_service)]
@@ -175,6 +192,7 @@ OrganizationServiceDep = Annotated[
     OrganizationService, Depends(get_organization_service)
 ]
 RoleServiceDep = Annotated[RoleService, Depends(get_role_service)]
+InviteServiceDep = Annotated[InviteService, Depends(get_invite_service)]
 
 # ------------------------ Auth dependency ---------------------------- #
 
@@ -225,8 +243,11 @@ CurrentUser = Annotated[User, Depends(get_current_user)]
 
 
 async def get_current_active_user(curr_user: CurrentUser):
-    if curr_user.is_active is False:
-        sentry_logger.warning("User {user_id} is inactive", user_id=curr_user.id)
+    user_id = curr_user.id
+    is_active = curr_user.is_active
+
+    if is_active is False:
+        sentry_logger.warning("User {user_id} is inactive", user_id=user_id)
         raise AuthorizationError(
             code=ErrorCode.USER_INACTIVE, details={"reason": "Inactive user"}
         )
@@ -245,9 +266,7 @@ async def get_current_cached_user(
 
     if not user:
         filters["is_verified"] = True
-        user = await user_service.get_user(
-            with_role=True, **filters
-        )
+        user = await user_service.get_user(with_role=True, **filters)
 
         await user_service.cache_user(user)
     return user
@@ -270,8 +289,13 @@ CurrentActiveCachedUser = Annotated[User, Depends(get_current_active_cached_user
 
 def require_roles(roles: list[Role]):
     async def role_checker(active_user: CurrentActiveCachedUser):
-        if active_user.role.name not in roles:
-            raise AuthorizationError(code=ErrorCode.NOT_PERMITTED)
+        if hasattr(active_user.role, "value"):
+            if active_user.role.value not in roles:
+                raise AuthorizationError(code=ErrorCode.NOT_PERMITTED)
+        else:
+            if active_user.role.name not in roles:
+                raise AuthorizationError(code=ErrorCode.NOT_PERMITTED)
+
         return active_user
 
     return role_checker

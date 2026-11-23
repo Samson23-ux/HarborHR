@@ -5,7 +5,7 @@ import json
 import secrets
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid7
 
 import httpx
 import pytest
@@ -155,7 +155,7 @@ class TestSignUpWithEmail:
 
         assert create_user.status_code == 201
         assert json_res["message"] == (
-            "Sign up completed successfully."
+            "Sign up completed successfully. "
             "Check your email for verification code and instructions"
         )
 
@@ -164,7 +164,7 @@ class TestSignUpWithEmail:
         self, session_maker: async_sessionmaker, async_client: httpx.AsyncClient
     ):
         test_user = await _get_test_user()
-        await add_user_to_db(session_maker, test_user.model_dump())
+        await add_user_to_db(session_maker, test_user.model_dump(), uuid7())
 
         res: httpx.Response = await async_client.post(
             "/auth/signup", json=_get_signup_payload()
@@ -202,6 +202,24 @@ class TestSignUpWithEmail:
         assert json_res["error"]["code"] == ErrorCode.VALIDATION_ERROR
         assert "body.organization_country" in json_res["error"]["details"]
 
+    @pytest.mark.asyncio
+    async def test_signup_with_deactivated_email(
+        self, session_maker: async_sessionmaker, async_client: httpx.AsyncClient
+    ):
+        test_user = await _get_test_user()
+        test_user.is_active = False
+
+        await add_user_to_db(session_maker, test_user.model_dump(), uuid7())
+
+        res: httpx.Response = await async_client.post(
+            "/auth/signup", json=_get_signup_payload()
+        )
+
+        assert res.status_code == 409
+
+        json_res = res.json()
+        assert json_res["error"]["code"] == ErrorCode.USER_DEACTIVATED
+
 
 class TestExistingUser:
     @pytest.mark.asyncio
@@ -209,7 +227,7 @@ class TestExistingUser:
         self, session_maker: async_sessionmaker, async_client: httpx.AsyncClient
     ):
         test_user = await _get_test_user()
-        await add_user_to_db(session_maker, test_user.model_dump())
+        await add_user_to_db(session_maker, test_user.model_dump(), uuid7())
 
         await _google_sign_in(async_client)
 
@@ -227,7 +245,7 @@ class TestExistingUser:
         test_user = await _get_test_user()
         test_user.is_verified = False
 
-        await add_user_to_db(session_maker, test_user.model_dump())
+        await add_user_to_db(session_maker, test_user.model_dump(), uuid7())
 
         await _google_sign_in(async_client)
 
@@ -307,7 +325,7 @@ class TestLogin:
         self, session_maker: async_sessionmaker, async_client: httpx.AsyncClient
     ):
         test_user = await _get_test_user()
-        await add_user_to_db(session_maker, test_user.model_dump())
+        await add_user_to_db(session_maker, test_user.model_dump(), uuid7())
 
         res: httpx.Response = await async_client.post(
             "/auth/login",
@@ -533,7 +551,7 @@ class TestVerifyOtp:
     ):
         test_user = await _get_test_user()
 
-        await add_user_to_db(session_maker, test_user.model_dump())
+        await add_user_to_db(session_maker, test_user.model_dump(), uuid7())
         await _seed_otp(_otp_key(test_user.id, "email_verification"), test_redis_client)
 
         res: httpx.Response = await async_client.patch(
@@ -552,7 +570,7 @@ class TestVerifyOtp:
     ):
         test_user = await _get_test_user()
 
-        await add_user_to_db(session_maker, test_user.model_dump())
+        await add_user_to_db(session_maker, test_user.model_dump(), uuid7())
         await _seed_otp(_otp_key(test_user.id, "email_verification"), test_redis_client)
 
         res: httpx.Response = await async_client.patch(
@@ -571,7 +589,7 @@ class TestVerifyOtp:
     ):
         test_user = await _get_test_user()
 
-        await add_user_to_db(session_maker, test_user.model_dump())
+        await add_user_to_db(session_maker, test_user.model_dump(), uuid7())
         await _seed_otp(_otp_key(test_user.id, "email_verification"), test_redis_client)
 
         for _ in range(SETTINGS.OTP_MAX_ATTEMPTS):
@@ -606,7 +624,7 @@ class TestLogout:
     ):
         test_user = await _get_test_user()
 
-        await add_user_to_db(session_maker, test_user.model_dump())
+        await add_user_to_db(session_maker, test_user.model_dump(), uuid7())
         res = await async_client.post(
             "/auth/logout",
         )
@@ -646,7 +664,7 @@ class TestDeactivateAccount:
     ):
         test_user = await _get_test_user()
 
-        await add_user_to_db(session_maker, test_user.model_dump())
+        await add_user_to_db(session_maker, test_user.model_dump(), uuid7())
         res = await async_client.delete(
             "/auth/deactivate",
         )
@@ -664,7 +682,7 @@ class TestResendOtp:
         test_user = await _get_test_user()
         test_user.is_verified = False
 
-        await add_user_to_db(session_maker, test_user.model_dump())
+        await add_user_to_db(session_maker, test_user.model_dump(), uuid7())
 
         path: str = "app.api.services.auth.send_email.apply_async"
 
@@ -693,7 +711,7 @@ class TestResendOtp:
         test_user = await _get_test_user()
         test_user.is_verified = False
 
-        await add_user_to_db(session_maker, test_user.model_dump())
+        await add_user_to_db(session_maker, test_user.model_dump(), uuid7())
 
         path: str = "app.api.services.auth.send_email.apply_async"
 
@@ -721,7 +739,7 @@ class TestReactivateAccount:
         test_user = await _get_test_user()
         test_user.is_active = False
 
-        await add_user_to_db(session_maker, test_user.model_dump())
+        await add_user_to_db(session_maker, test_user.model_dump(), uuid7())
 
         path: str = "app.api.services.auth.send_email.apply_async"
 
@@ -777,7 +795,7 @@ class TestReactivateAccount:
         test_redis_client: Redis,
     ):
         test_user = await _get_test_user()
-        await add_user_to_db(session_maker, test_user.model_dump())
+        await add_user_to_db(session_maker, test_user.model_dump(), uuid7())
 
         path: str = "app.api.services.auth.send_email.apply_async"
 

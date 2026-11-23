@@ -1,5 +1,8 @@
+from __future__ import annotations
+
 import uuid
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import (
     UUID,
@@ -11,10 +14,13 @@ from sqlalchemy import (
     Text,
     text,
 )
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.api.models.base import Base
 from app.core.enum import InviteStatus
+
+if TYPE_CHECKING:
+    from app.api.models.employee import Employee
 
 
 class Invite(Base):
@@ -38,10 +44,6 @@ class Invite(Base):
         UUID,
         ForeignKey("users.id", name="invites_created_by_fk", ondelete="RESTRICT"),
     )
-    role_id: Mapped[uuid.UUID] = mapped_column(
-        UUID,
-        ForeignKey("roles.id", name="invites_role_fk", ondelete="RESTRICT"),
-    )
     status: Mapped[InviteStatus] = mapped_column(
         Enum(InviteStatus, values_callable=lambda e: [m.value for m in e]),
         default=InviteStatus.ACTIVE,
@@ -51,6 +53,8 @@ class Invite(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC)
     )
+
+    employee: Mapped[Employee] = relationship("Employee", viewonly=True)
 
     __table_args__ = (
         PrimaryKeyConstraint("id", name="invites_pk"),

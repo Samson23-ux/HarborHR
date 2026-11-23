@@ -1,6 +1,9 @@
+from __future__ import annotations
+
 import uuid
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
 from sqlalchemy import (
     UUID,
@@ -15,13 +18,16 @@ from sqlalchemy import (
     PrimaryKeyConstraint,
     String,
     UniqueConstraint,
-    func,
+    literal_column,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, ExcludeConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.api.models.base import Base
+
+if TYPE_CHECKING:
+    from app.api.models.role import Role
 
 
 class Employee(Base):
@@ -33,6 +39,10 @@ class Employee(Base):
     first_name: Mapped[str] = mapped_column(String)
     last_name: Mapped[str] = mapped_column(String)
     email: Mapped[str | None] = mapped_column(String, unique=True)
+    role_id: Mapped[uuid.UUID] = mapped_column(
+        UUID,
+        ForeignKey("roles.id", name="users_role_fk", ondelete="RESTRICT"),
+    )
     organization_id: Mapped[uuid.UUID] = mapped_column(
         UUID,
         ForeignKey(
@@ -63,6 +73,7 @@ class Employee(Base):
         ),
     )
 
+    role: Mapped[Role] = relationship("Role", viewonly=True)
     employment_periods: Mapped[list[EmploymentPeriod]] = relationship(
         "EmploymentPeriod", viewonly=True
     )
@@ -103,7 +114,10 @@ class EmploymentPeriod(Base):
         ),
         ExcludeConstraint(
             ("employee_id", "="),
-            (func.daterange("start_date", "end_date", "[)"), "&&"),
+            (
+                literal_column("daterange(start_date, end_date, '[)')"),
+                "&&",
+            ),
             using="gist",
             name="employment_period_ex",
         ),
@@ -137,7 +151,7 @@ class EmployeePay(Base):
     other_deduction: Mapped[Decimal | None] = mapped_column(
         Numeric(precision=14, scale=2)
     )
-    version: Mapped[int] = mapped_column(Integer)
+    version: Mapped[int] = mapped_column(Integer, default=1)
     effective_from: Mapped[date] = mapped_column(Date)
     created_by: Mapped[uuid.UUID] = mapped_column(
         UUID,

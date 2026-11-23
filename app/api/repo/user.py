@@ -38,14 +38,6 @@ class UserRepository(BaseRepository[UserBase, User]):
 
         return filter_conditions
 
-    def _email_or_google_user(self, email):
-        return (
-            or_(
-                self.model.email == email,
-                self.model.google_email == email,
-            ),
-        )
-
     def _select_in(
         self,
         stmt,
@@ -89,11 +81,20 @@ class UserRepository(BaseRepository[UserBase, User]):
         *,
         is_active: bool | None = None,
         with_role: bool = False,
+        with_lock: bool = False,
     ) -> User | None:
-        stmt = select(self.model).where(self._email_or_google_user(email))
+        stmt = select(self.model).where(
+            or_(
+                self.model.email == email,
+                self.model.google_email == email,
+            )
+        )
 
-        if is_active:
-            stmt = stmt.where(self.model.is_active(is_active))
+        if is_active is not None:
+            stmt = stmt.where(self.model.is_active.is_(is_active))
+
+        if with_lock:
+            stmt = stmt.with_for_update()
 
         stmt = self._select_in(stmt, with_role=with_role)
 

@@ -13,6 +13,9 @@ from app.core.exceptions import (
     GoogleSignInError,
     InvalidEmploymentPeriodError,
     InvalidOtpError,
+    InviteExistsError,
+    InviteExpiredError,
+    InviteUserExistsError,
     NotFoundError,
     OauthSignInError,
     OtpAttemptsExceededError,
@@ -186,6 +189,39 @@ class ExceptionHandler:
                         "An active employment period already exists. Update its "
                         "end_date before creating a new one."
                     ),
+                },
+                status_code=409,
+            ),
+        )
+
+        self._app.add_exception_handler(
+            exc_class_or_status_code=InviteExistsError,
+            handler=create_exception_handler(
+                detail={
+                    "status": "error",
+                    "message": "An active invite already exists for this employee.",
+                },
+                status_code=409,
+            ),
+        )
+
+        self._app.add_exception_handler(
+            exc_class_or_status_code=InviteExpiredError,
+            handler=create_exception_handler(
+                detail={
+                    "status": "error",
+                    "message": "This invite has expired.",
+                },
+                status_code=410,
+            ),
+        )
+
+        self._app.add_exception_handler(
+            exc_class_or_status_code=InviteUserExistsError,
+            handler=create_exception_handler(
+                detail={
+                    "status": "error",
+                    "message": "A user account already exists for this invite.",
                 },
                 status_code=409,
             ),

@@ -14,7 +14,6 @@ from app.api.schemas.organization import (
 )
 from app.core.exceptions import (
     AuthorizationError,
-    ErrorCode,
     NotFoundError,
     ServerError,
 )
@@ -48,46 +47,17 @@ class OrganizationService:
             sentry_logger.error("Error occurred while creating organization")
             raise ServerError() from exc
 
-    async def select_organization_id(self, **filters) -> UUID:
-        try:
-            organization_id: UUID | None = (
-                await self._organization_repo.select_record_id(**filters)
-            )
-
-            if not organization_id:
-                sentry_logger.warning("Organization not found")
-                raise NotFoundError(entity="Organization")
-
-            return organization_id
-        except NotFoundError:
-            raise
-        except Exception as exc:
-            sentry_sdk.capture_exception(exc)
-            sentry_logger.error("Error occurred while selecting organization")
-            raise ServerError() from exc
-
-    @staticmethod
-    def _authorize_organization_access(curr_user: User, organization_id: UUID):
-        if curr_user.organization_id != organization_id:
-            sentry_logger.warning(
-                "User {user_id} attempted to access organization {organization_id}",
-                user_id=curr_user.id,
-                organization_id=organization_id,
-            )
-            raise AuthorizationError(
-                code=ErrorCode.NOT_PERMITTED,
-                details={"reason": "Organization access denied"},
-            )
-
     async def get_organization(
         self, curr_user: User, organization_id: UUID
     ) -> OrganizationResponse:
         try:
-            self._authorize_organization_access(curr_user, organization_id)
-            await self._organization_repo.set_org_id_async(curr_user.organization_id)
+            org_id = curr_user.organization_id
+            await self._organization_repo.set_org_id_async(org_id)
 
-            organization: Organization | None = (
-                await self._organization_repo.get_record(id=organization_id)
+            organization: (
+                Organization | None
+            ) = await self._organization_repo.get_record(
+                id=organization_id, owner=org_id
             )
 
             if not organization:
@@ -98,7 +68,7 @@ class OrganizationService:
                 raise NotFoundError(entity="Organization")
 
             return OrganizationResponse.model_validate(organization)
-        except (NotFoundError, AuthorizationError):
+        except NotFoundError, AuthorizationError:
             raise
         except Exception as exc:
             sentry_sdk.capture_exception(exc)
@@ -115,11 +85,13 @@ class OrganizationService:
         organization_update: OrganizationUpdate,
     ) -> OrganizationResponse:
         try:
-            self._authorize_organization_access(curr_user, organization_id)
-            await self._organization_repo.set_org_id_async(curr_user.organization_id)
+            org_id = curr_user.organization_id
+            await self._organization_repo.set_org_id_async(org_id)
 
-            organization: Organization | None = (
-                await self._organization_repo.get_record(id=organization_id)
+            organization: (
+                Organization | None
+            ) = await self._organization_repo.get_record(
+                id=organization_id, owner=org_id
             )
 
             if not organization:
@@ -149,7 +121,7 @@ class OrganizationService:
                 )
 
             return OrganizationResponse.model_validate(organization)
-        except (NotFoundError, AuthorizationError):
+        except NotFoundError, AuthorizationError:
             raise
         except Exception as exc:
             await self._organization_repo.rollback()

@@ -100,6 +100,27 @@ class EntityExistsError(AppException):
         self.entity_property = entity_property
 
 
+class InviteExistsError(AppException):
+    """An active invite already exists for the employee"""
+
+    def __init__(self):
+        super().__init__(ErrorCode.INVITE_EXISTS)
+
+
+class InviteExpiredError(AppException):
+    """The invite has expired and can no longer be used"""
+
+    def __init__(self):
+        super().__init__(ErrorCode.INVITE_EXPIRED)
+
+
+class InviteUserExistsError(AppException):
+    """A user account already exists for the invited employee"""
+
+    def __init__(self):
+        super().__init__(ErrorCode.INVITE_USER_EXISTS)
+
+
 class NotFoundError(AppException):
     """Entity not found"""
 

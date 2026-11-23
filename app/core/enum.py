@@ -23,7 +23,7 @@ class InviteStatus(StrEnum):
     USED = "used"
     ACTIVE = "active"
     EXPIRED = "expired"
-    REVOKED = "revoked"
+    REJECTED = "rejected"
 
 
 class OtpPurpose(StrEnum):
@@ -81,3 +81,8 @@ class ErrorCode(StrEnum):
     EMPLOYEE_EXISTS = "EMPLOYEE_EXISTS"
     INVALID_EMPLOYMENT_PERIOD = "INVALID_EMPLOYMENT_PERIOD"
     ACTIVE_EMPLOYMENT_PERIOD = "ACTIVE_EMPLOYMENT_PERIOD"
+
+    # Invite
+    INVITE_EXISTS = "INVITE_EXISTS"
+    INVITE_EXPIRED = "INVITE_EXPIRED"
+    INVITE_USER_EXISTS = "INVITE_USER_EXISTS"

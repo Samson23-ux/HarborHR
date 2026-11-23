@@ -11,6 +11,7 @@ from app.api.schemas.employee import (
     EmployeePayResponse,
     EmployeeResponse,
     EmployeeResponseWithDetails,
+    EmployeeSearchQuery,
     EmployeeUpdate,
     EmploymentPeriod,
     EmploymentPeriodResponse,
@@ -28,6 +29,58 @@ from app.deps import (
 )
 
 router = APIRouter()
+
+
+@router.get(
+    "/employees",
+    status_code=200,
+    description="Get all employees",
+    response_model=AllSuccessResponse[EmployeeResponse | EmployeeResponseWithDetails],
+    dependencies=[read_limiter],
+)
+async def get_employees(
+    request: Request,
+    list_query: Annotated[EmployeeListQuery, Query()],
+    curr_user: Annotated[
+        User | CachedUser, Depends(require_roles([Role.ADMIN, Role.PAYROLL_OFFICER]))
+    ],
+    employee_service: EmployeeServiceDep,
+):
+    employees_response, cursor = await employee_service.get_employees(
+        curr_user, list_query
+    )
+
+    return AllSuccessResponse(
+        message="Employees retrieved successfully",
+        data=employees_response,
+        cursor=cursor,
+    )
+
+
+@router.get(
+    "/employees/search",
+    status_code=200,
+    description="Search for an employees",
+    response_model=AllSuccessResponse[EmployeeResponse],
+    dependencies=[read_limiter],
+)
+async def search_employees(
+    request: Request,
+    list_query: Annotated[EmployeeSearchQuery, Query()],
+    curr_user: Annotated[
+        User | CachedUser, Depends(require_roles([Role.ADMIN, Role.PAYROLL_OFFICER]))
+    ],
+    employee_service: EmployeeServiceDep,
+):
+    employees_response, cursor = await employee_service.search_employees(
+        curr_user, list_query
+    )
+
+    return AllSuccessResponse(
+        message="Employees retrieved successfully",
+        data=employees_response,
+        cursor=cursor,
+    )
 
 
 @router.get(
@@ -51,62 +104,6 @@ async def get_employee(
     ) = await employee_service.get_employee(curr_user, id, details)
 
     return SuccessResponse(message="Employee retrieved successfully", data=employee)
-
-
-@router.get(
-    "/employees/search",
-    status_code=200,
-    description="Search for an employees",
-    response_model=AllSuccessResponse[EmployeeResponse],
-    dependencies=[read_limiter],
-)
-async def search_employees(
-    request: Request,
-    q: Annotated[
-        str, Query(..., description="Search employees by first_name or last_name")
-    ],
-    list_query: EmployeeListQuery,
-    curr_user: Annotated[
-        User | CachedUser, Depends(require_roles([Role.ADMIN, Role.PAYROLL_OFFICER]))
-    ],
-    employee_service: EmployeeServiceDep,
-):
-    employees_response, cursor = await employee_service.search_employees(
-        curr_user, q, list_query
-    )
-
-    return AllSuccessResponse(
-        message="Employees retrieved successfully",
-        data=employees_response,
-        cursor=cursor,
-    )
-
-
-@router.get(
-    "/employees",
-    status_code=200,
-    description="Get all employees",
-    response_model=AllSuccessResponse[EmployeeResponse | EmployeeResponseWithDetails],
-    dependencies=[read_limiter],
-)
-async def get_employees(
-    request: Request,
-    details: bool,
-    list_query: EmployeeListQuery,
-    curr_user: Annotated[
-        User | CachedUser, Depends(require_roles([Role.ADMIN, Role.PAYROLL_OFFICER]))
-    ],
-    employee_service: EmployeeServiceDep,
-):
-    employees_response, cursor = await employee_service.get_employees(
-        curr_user, details, list_query
-    )
-
-    return AllSuccessResponse(
-        message="Employees retrieved successfully",
-        data=employees_response,
-        cursor=cursor,
-    )
 
 
 @router.post(

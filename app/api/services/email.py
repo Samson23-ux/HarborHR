@@ -1,4 +1,4 @@
-from uuid import UUID
+from uuid import UUID, uuid7
 
 import resend
 import sentry_sdk
@@ -8,6 +8,7 @@ from app.api.models.email import Email
 from app.api.repo.email import EmailRepository
 from app.api.schemas.email import EmailInDB
 from app.core.exceptions import ServerError
+lazy from app.worker.tasks.email import send_email
 
 
 class EmailService:
@@ -30,6 +31,12 @@ class EmailService:
                 "Error occurred while creating email record",
             )
             raise ServerError() from exc
+
+    async def send_email(self, payload: dict, recipient_email: str):
+        email_db: EmailInDB = EmailInDB(id=uuid7(), processed_email=recipient_email)
+        await self.create_email(email_db)
+
+        send_email.apply_async(priority=3, kwargs=payload)
 
     def get_processed_email(self, email_id: UUID) -> Email | None:
         email: Email | None = self._email_repo.get_sync_record(id=email_id)

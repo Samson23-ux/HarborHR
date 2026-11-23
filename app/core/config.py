@@ -72,6 +72,10 @@ class Settings(BaseSettings):
     OTP_EXPIRE_TIME: int = 15
     OTP_MAX_ATTEMPTS: int = 5
 
+    # invite
+    INVITE_EXPIRY: int
+    INVITE_TOKEN_SECRET: str
+
     # rate limit keys
     READ_LIMIT_KEY: str = "limiter:read"
     WRITE_LIMIT_KEY: str = "limiter:write"

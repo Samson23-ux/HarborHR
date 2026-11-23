@@ -1,5 +1,8 @@
+import secrets
+from collections.abc import AsyncGenerator, Awaitable
+from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
-from uuid import uuid7
+from uuid import UUID, uuid4, uuid7
 
 import pytest
 import pytest_asyncio
@@ -7,6 +10,7 @@ from asgi_lifespan import LifespanManager
 from httpx import ASGITransport, AsyncClient, Response
 from redis.asyncio import Redis
 from sqlalchemy import select, text
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import (
     AsyncConnection,
     AsyncEngine,
@@ -19,12 +23,14 @@ from sqlalchemy.pool import NullPool
 
 from app.api import models  # noqa: F401
 from app.api.models.base import Base
+from app.api.models.employee import Employee, EmployeePay, EmploymentPeriod
+from app.api.models.invite import Invite
 from app.api.models.organization import Organization
 from app.api.models.role import Role as DbRole
 from app.api.models.user import User
 from app.api.schemas.user import UserInDB
 from app.core.config import get_settings
-from app.core.enum import Role
+from app.core.enum import InviteStatus, Role
 from app.core.security import Security
 from app.database.session import get_session
 from app.deps import (
@@ -93,6 +99,7 @@ async def prepare_database(conn: AsyncConnection):
     )
 
     await conn.execute(text("CREATE EXTENSION IF NOT EXISTS btree_gist;"))
+    await conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm;"))
     await conn.run_sync(Base.metadata.create_all)
 
 
@@ -101,6 +108,7 @@ async def clean_database(conn: AsyncConnection):
     await conn.execute(text("DROP EXTENSION IF EXISTS pgcrypto CASCADE;"))
     await conn.run_sync(Base.metadata.drop_all)
     await conn.execute(text("DROP EXTENSION IF EXISTS btree_gist;"))
+    await conn.execute(text("DROP EXTENSION IF EXISTS pg_trgm;"))
 
 
 @pytest_asyncio.fixture(scope="session")
@@ -216,7 +224,7 @@ APP_ROLE = {
 async def _get_test_user():
     return UserInDB(
         id=uuid7(),
-        role_id=APP_ROLE[Role.STAFF]["id"],
+        role_id=APP_ROLE[Role.ADMIN]["id"],
         is_active=True,
         is_verified=True,
         email="user@example.com",
@@ -241,23 +249,22 @@ async def seed_role(session_maker: async_sessionmaker):
         await session.commit()
 
 
-async def add_user_to_db(session_maker: async_sessionmaker, user: dict):
+async def add_user_to_db(session_maker: async_sessionmaker, user: dict, org_id: UUID):
     async with session_maker() as session:
-        org_id = uuid7()
         user["organization_id"] = org_id
 
-        session.add(Organization(id=org_id, name="test_org_name_", country="ESP"))
-        await session.flush()
+        await session.execute(
+            insert(Organization)
+            .values(id=org_id, name="test_org_name_", country="ESP")
+            .on_conflict_do_nothing(index_elements=["id"])
+        )
 
         session.add(User(**user))
         await session.commit()
 
 
 async def get_user_from_db(session_maker: async_sessionmaker, key: str, value: str):
-    filters = {
-        "email": User.email,
-        "google_email": User.google_email
-    }
+    filters = {"email": User.email, "google_email": User.google_email}
     async with session_maker() as session:
         res = await session.execute(select(User).where(filters[key] == value))
         return res.scalar()
@@ -281,7 +288,7 @@ async def create_user(async_client: AsyncClient):
 @pytest_asyncio.fixture
 async def login(session_maker: async_sessionmaker, async_client: AsyncClient):
     test_user = await _get_test_user()
-    await add_user_to_db(session_maker, test_user.model_dump())
+    await add_user_to_db(session_maker, test_user.model_dump(), uuid7())
 
     login_payload: dict = {
         "email": "user@example.com",
@@ -294,3 +301,169 @@ async def login(session_maker: async_sessionmaker, async_client: AsyncClient):
     )
 
     return res
+
+
+async def add_user(
+    org_id: UUID,
+    session_maker: async_sessionmaker,
+    *,
+    role_key: str = "staff",
+    email: str = "staff@example.com",
+    is_active: bool = True,
+    is_verified: bool = True,
+) -> dict:
+    user = (await _get_test_user()).model_dump()
+    user.update(
+        id=uuid7(),
+        role_id=APP_ROLE[role_key]["id"],
+        email=email,
+        is_active=is_active,
+        is_verified=is_verified,
+    )
+    await add_user_to_db(session_maker, user, org_id)
+    return user
+
+
+@pytest_asyncio.fixture
+async def admin_user(
+    session_maker: async_sessionmaker,
+) -> AsyncGenerator[Awaitable[dict]]:
+    async def _create(org_id: UUID):
+        return await add_user(
+            org_id,
+            session_maker,
+            role_key="admin",
+            email=f"admin_{uuid4().hex[:8]}@example.com",
+        )
+
+    yield _create
+
+
+@pytest_asyncio.fixture
+async def employee_user(
+    session_maker: async_sessionmaker,
+) -> AsyncGenerator[Awaitable[dict]]:
+    async def _create(org_id: UUID):
+        return await add_user(
+            org_id,
+            session_maker,
+            role_key="employee",
+            email=f"employee_{uuid4().hex[:8]}@example.com",
+        )
+
+    yield _create
+
+
+async def _login_user(async_client: AsyncClient, user: dict) -> dict[str, str]:
+    res: Response = await async_client.post(
+        "/auth/login",
+        json={"email": user["email"], "password": "test_user_password"},
+    )
+    return {"Authorization": f"Bearer {res.json()['data']['access_token']}"}
+
+
+async def add_employee_to_db(
+    session_maker: async_sessionmaker,
+    organization_id,
+    **overrides,
+) -> dict:
+    employee = {
+        "id": uuid7(),
+        "first_name": "John",
+        "last_name": "Doe",
+        "email": f"employee_{uuid4().hex[:8]}@example.com",
+        "organization_id": organization_id,
+        "role_id": APP_ROLE["employee"]["id"],
+        "is_active": True,
+    }
+    employee.update(overrides)
+
+    async with session_maker() as session:
+        session.add(Employee(**employee))
+        await session.commit()
+
+    return employee
+
+
+async def add_employment_period_to_db(
+    session_maker: async_sessionmaker,
+    employee: dict,
+    start_date,
+    end_date=None,
+    **overrides,
+) -> dict:
+    period = {
+        "id": uuid7(),
+        "employee_id": employee["id"],
+        "organization_id": employee["organization_id"],
+        "start_date": start_date,
+        "end_date": end_date,
+    }
+    period.update(overrides)
+
+    async with session_maker() as session:
+        session.add(EmploymentPeriod(**period))
+        await session.commit()
+
+    return period
+
+
+async def add_pay_to_db(
+    session_maker: async_sessionmaker,
+    employee: dict,
+    created_by,
+    effective_from,
+    version: int = 1,
+    **overrides,
+) -> dict:
+    pay = {
+        "id": uuid7(),
+        "employee_id": employee["id"],
+        "organization_id": employee["organization_id"],
+        "basic": "1000.00",
+        "housing": "100.00",
+        "transport": "50.00",
+        "version": version,
+        "effective_from": effective_from,
+        "created_by": created_by,
+    }
+    pay.update(overrides)
+
+    async with session_maker() as session:
+        session.add(EmployeePay(**pay))
+        await session.commit()
+
+    return pay
+
+
+def hash_invite_token(token: str) -> str:
+    return SECURITY.hash_value_256(token, SETTINGS.INVITE_TOKEN_SECRET)
+
+
+async def add_invite_to_db(
+    session_maker: async_sessionmaker,
+    employee: dict,
+    created_by,
+    token: str | None = None,
+    status: InviteStatus = InviteStatus.ACTIVE,
+    expires_at: datetime | None = None,
+    **overrides,
+) -> dict:
+    token = token or secrets.token_urlsafe(32)
+
+    invite = {
+        "id": uuid7(),
+        "employee_id": employee["id"],
+        "organization_id": employee["organization_id"],
+        "hashed_token": hash_invite_token(token),
+        "created_by": created_by,
+        "status": status,
+        "expires_at": expires_at or (datetime.now(UTC) + timedelta(hours=1)),
+    }
+    invite.update(overrides)
+
+    async with session_maker() as session:
+        session.add(Invite(**invite))
+        await session.commit()
+
+    return {**invite, "token": token}

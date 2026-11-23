@@ -81,7 +81,7 @@ class BaseRepository[Entity: BaseModel, SqlAlchemyModel: Base](ABC):
         )
 
     def add(
-        self, entity: Entity | None = None, model: SqlAlchemyModel | None = None
+        self, *, entity: Entity | None = None, model: SqlAlchemyModel | None = None
     ) -> SqlAlchemyModel:
         if not model:
             model = self._entity_to_model(entity)

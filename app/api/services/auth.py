@@ -201,19 +201,15 @@ class AuthService:
         user_id: UUID,
         otp_purpose: str,
     ):
-        email_db: EmailInDB = EmailInDB(id=uuid7(), processed_email=recipient_email)
-        await self._email_service.create_email(email_db)
+        payload: dict = {
+            "email_subject": email_subject,
+            "email_message": verification_message(
+                await otp_service.create_otp(user_id, otp_purpose)
+            ),
+            "recipient_email": recipient_email,
+        }
 
-        send_email.apply_async(
-            priority=3,
-            kwargs={
-                "email_subject": email_subject,
-                "email_message": verification_message(
-                    await otp_service.create_otp(user_id, otp_purpose)
-                ),
-                "recipient_email": recipient_email,
-            },
-        )
+        await self._email_service.send_email(payload, recipient_email)
 
     async def sign_up_with_email(
         self,
@@ -623,7 +619,8 @@ class AuthService:
         return access_token, refresh_token_payload.get("refresh_token")
 
     async def get_current_user(self, curr_user: User) -> UserResponse:
-        sentry_logger.info("User {user_id} account retrieved", user_id=curr_user.id)
+        user_id = curr_user.id
+        sentry_logger.info("User {user_id} account retrieved", user_id=user_id)
         return UserResponse.model_validate(curr_user)
 
     async def logout(
@@ -632,11 +629,10 @@ class AuthService:
         refresh_token: str,
         security: Security,
     ):
+        user_id = curr_user.id
         await self._revoke_session(refresh_token, security)
 
-        sentry_logger.info(
-            "User {user_id} account logout completed", user_id=curr_user.id
-        )
+        sentry_logger.info("User {user_id} account logout completed", user_id=user_id)
 
     async def deactivate_account(
         self,
@@ -645,13 +641,14 @@ class AuthService:
         refresh_token: str,
         security: Security,
     ):
+        user_id = curr_user.id
         curr_user.is_active = False
         curr_user.updated_at = datetime.now(UTC)
 
         await user_service.update_user(curr_user, commit=True)
         await self._revoke_all_sessions(refresh_token, security)
 
-        sentry_logger.info("User {user_id} account deactivated", user_id=curr_user.id)
+        sentry_logger.info("User {user_id} account deactivated", user_id=user_id)
 
     async def reactivate_account(
         self,

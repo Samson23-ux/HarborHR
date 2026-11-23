@@ -2,11 +2,16 @@ from datetime import datetime
 
 from sqlalchemy import or_, select
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.orm import selectinload
 
 from app.api.models.employee import Employee
 from app.api.repo.base import BaseRepository
 from app.api.schemas.employee import Base as EmployeeBase
-from app.api.schemas.employee import EmployeeInDb, EmployeeListQuery
+from app.api.schemas.employee import (
+    EmployeeInDb,
+    EmployeeListQuery,
+    EmployeeSearchQuery,
+)
 
 
 class EmployeeRepository(BaseRepository[EmployeeBase, Employee]):
@@ -24,12 +29,14 @@ class EmployeeRepository(BaseRepository[EmployeeBase, Employee]):
             filter_conditions.append(self.model.id == filters["id"])
         if "email" in filters:
             filter_conditions.append(self.model.email == filters["email"])
-        if "is_active" in filters:
+        if filters.get("is_active") is not None:
             filter_conditions.append(self.model.is_active.is_(filters["is_active"]))
         if "organization_id" in filters:
             filter_conditions.append(
                 self.model.organization_id == filters["organization_id"]
             )
+        if "email_exists" in filters:
+            filter_conditions.append(self.model.email.is_not(None))
 
         return filter_conditions
 
@@ -70,44 +77,66 @@ class EmployeeRepository(BaseRepository[EmployeeBase, Employee]):
             .returning(self.model)
         )
 
+        created = res.scalar()
+
+        if not created:
+            return None
+
+        res = await self.async_session.execute(
+            select(self.model)
+            .where(self.model.id == created.id)
+            .options(selectinload(self.model.role))
+        )
         return res.scalar()
 
-    async def get_employees(
-        self, details: bool, list_query: EmployeeListQuery, **filters
-    ) -> dict:
+    async def get_employees(self, list_query: EmployeeListQuery, **filters) -> dict:
         filter_conditions = self._get_filters(**filters)
-        stmt = select(self.model).where(*filter_conditions)
+        stmt = (
+            select(self.model)
+            .where(*filter_conditions)
+            .options(selectinload(self.model.role))
+        )
 
-        if details:
-            stmt = stmt.options(self.model.employment_periods).options(
-                self.model.employee_pay
+        if list_query.details:
+            stmt = stmt.options(
+                selectinload(self.model.employment_periods),
+                selectinload(self.model.employee_pay),
             )
 
         return await self.sort_and_paginate(stmt, list_query)
 
-    async def get_employee_with_details(self, **filters) -> Employee | None:
+    async def get_employee(self, details: bool = False, **filters) -> Employee | None:
         filter_conditions = self._get_filters(**filters)
 
         stmt = (
             select(self.model)
-            .where(*filter_conditions, self.model.is_active.is_(True))
-            .options(self.model.employment_periods)
-            .options(self.model.employee_pay)
+            .where(*filter_conditions)
+            .options(selectinload(self.model.role))
         )
+
+        if details:
+            stmt = stmt.options(
+                selectinload(self.model.employment_periods),
+                selectinload(self.model.employee_pay),
+            )
 
         res = await self.async_session.execute(stmt)
         return res.scalar()
 
-    async def search_employees(self, q: str, list_query: EmployeeListQuery, **filters):
-        q = self._escape_search_param(q)
+    async def search_employees(self, list_query: EmployeeSearchQuery, **filters):
+        q = self._escape_search_param(list_query.q)
         filter_conditions = self._get_filters(**filters)
 
-        stmt = select(self.model).where(
-            *filter_conditions,
-            or_(
-                self.model.first_name.ilike(q, escape=self.LIKE_ESCAPE),
-                self.model.last_name.ilike(q, escape=self.LIKE_ESCAPE),
-            ),
+        stmt = (
+            select(self.model)
+            .where(
+                *filter_conditions,
+                or_(
+                    self.model.first_name.ilike(q, escape=self.LIKE_ESCAPE),
+                    self.model.last_name.ilike(q, escape=self.LIKE_ESCAPE),
+                ),
+            )
+            .options(selectinload(self.model.role))
         )
 
         return await self.sort_and_paginate(stmt, list_query)
