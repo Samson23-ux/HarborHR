@@ -84,6 +84,7 @@ class InviteRepository(BaseRepository[InviteInDb, Invite]):
         stmt = (
             select(self.model)
             .where(*filter_conditions)
+            .with_for_update()
             .options(selectinload(self.model.employee))
         )
 
