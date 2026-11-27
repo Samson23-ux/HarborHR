@@ -1,8 +1,8 @@
 from datetime import datetime
 
 
-def is_valid_datetime(iso_datetime: str) -> datetime | bool:
+def parse_iso_datetime(iso_datetime: str) -> datetime | None:
     try:
         return datetime.fromisoformat(iso_datetime)
     except ValueError, TypeError:
-        return False
+        return None

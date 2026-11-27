@@ -6,7 +6,7 @@ from sqlalchemy.orm import selectinload
 from app.api.models.user import User
 from app.api.repo.base import BaseRepository
 from app.api.schemas.user import UserBase
-from app.utils import is_valid_datetime
+from app.utils import parse_iso_datetime
 
 
 class UserRepository(BaseRepository[UserBase, User]):
@@ -52,7 +52,8 @@ class UserRepository(BaseRepository[UserBase, User]):
         is_valid = True
 
         if isinstance(val, str) and val.endswith("+00:00"):
-            val = is_valid_datetime(val)
+            val = parse_iso_datetime(val)
+            is_valid = val is not None
 
         return is_valid, val
 
