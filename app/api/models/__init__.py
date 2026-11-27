@@ -8,6 +8,7 @@ from app.api.models.employee import (
 from app.api.models.invite import Invite
 from app.api.models.organization import Organization
 from app.api.models.role import Role
+from app.api.models.statutory_rules import StatutoryRule
 from app.api.models.user import User
 
 __all__ = [
@@ -19,5 +20,6 @@ __all__ = [
     "Invite",
     "Organization",
     "Role",
+    "StatutoryRule",
     "User",
 ]
