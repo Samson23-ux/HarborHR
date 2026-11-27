@@ -40,6 +40,7 @@ from app.api.services.role import RoleService
 from app.api.services.user import UserService
 from app.core.exceptions import (
     ActiveEmploymentPeriodError,
+    EmployeePayExistsError,
     EntityExistsError,
     InvalidEmploymentPeriodError,
     NotFoundError,
@@ -482,11 +483,23 @@ class EmployeeService:
                 **employee_pay.model_dump(),
             )
 
-            pay_db: EmployeePay = await pay_repo.create_employee_pay(
+            pay_db: EmployeePay | None = await pay_repo.create_employee_pay(
                 pay_in_db,
                 employee_id=employee_id,
                 organization_id=org_id,
             )
+
+            if not pay_db:
+                sentry_logger.warning(
+                    "Pay with effective_from {effective_from} already exists for "
+                    "employee {employee_id}",
+                    effective_from=employee_pay.effective_from,
+                    employee_id=employee_id,
+                    details={"org_id": org_id},
+                )
+                raise EmployeePayExistsError(
+                    effective_from=employee_pay.effective_from
+                )
 
             await pay_repo.commit()
             await pay_repo.refresh(pay_db)
@@ -497,6 +510,8 @@ class EmployeeService:
                 details={"org_id": org_id},
             )
             return EmployeePayResponse.model_validate(pay_db)
+        except EmployeePayExistsError:
+            raise
         except Exception as exc:
             await pay_repo.rollback()
 

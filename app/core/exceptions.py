@@ -184,6 +184,14 @@ class ActiveEmploymentPeriodError(AppException):
         super().__init__(ErrorCode.ACTIVE_EMPLOYMENT_PERIOD)
 
 
+class EmployeePayExistsError(AppException):
+    """A pay record with the same effective_from already exists for the employee"""
+
+    def __init__(self, effective_from):
+        super().__init__(ErrorCode.EMPLOYEE_PAY_EXISTS)
+        self.effective_from = effective_from
+
+
 def create_exception_handler(
     status_code: int, detail: dict
 ) -> Callable[[Request, AppException], Awaitable[JSONResponse]]:

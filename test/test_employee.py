@@ -325,6 +325,34 @@ class TestEmployeePay:
         assert res.json()["data"]["version"] == 2
 
     @pytest.mark.asyncio
+    async def test_create_pay_duplicate_effective_from(
+        self,
+        async_client: httpx.AsyncClient,
+        session_maker: async_sessionmaker,
+        admin_user,
+    ):
+        user = await admin_user(uuid7())
+        employee = await add_employee_to_db(session_maker, user["organization_id"])
+
+        headers = await _login_user(async_client, user)
+        payload = _pay_payload("2024-02-01")
+
+        first = await async_client.post(
+            f"/employees/{employee['id']}/pay",
+            headers=headers,
+            json=payload,
+        )
+        duplicate = await async_client.post(
+            f"/employees/{employee['id']}/pay",
+            headers=headers,
+            json=payload,
+        )
+
+        assert first.status_code == 201
+        assert duplicate.status_code == 409
+        assert duplicate.json()["error"]["code"] == ErrorCode.EMPLOYEE_PAY_EXISTS
+
+    @pytest.mark.asyncio
     async def test_create_pay_invalid_body(
         self,
         async_client: httpx.AsyncClient,

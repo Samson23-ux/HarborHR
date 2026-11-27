@@ -1,6 +1,7 @@
 from typing import Any
 
-from sqlalchemy import func, insert, select
+from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert
 
 from app.api.models.employee import EmployeePay as EmployeePayModel
 from app.api.repo.base import BaseRepository
@@ -58,7 +59,12 @@ class EmployeePayRepository(BaseRepository[EmployeePaySchema, EmployeePayModel])
         self, pay: EmployeePaySchema, **filters
     ) -> EmployeePayModel:
         filter_conditions = self._get_filters(**filters)
-        select_stmt = (
+
+        await self.async_session.execute(
+            select(self.model.id).where(*filter_conditions).with_for_update()
+        )
+
+        version = (
             select(func.coalesce(func.max(self.model.version), 0) + 1)
             .where(*filter_conditions)
             .scalar_subquery()
@@ -66,7 +72,8 @@ class EmployeePayRepository(BaseRepository[EmployeePaySchema, EmployeePayModel])
 
         result = await self.async_session.execute(
             insert(self.model)
-            .values(**pay.model_dump(), version=select_stmt)
+            .values(**pay.model_dump(), version=version)
+            .on_conflict_do_nothing(index_elements=["employee_id", "effective_from"])
             .returning(self.model)
         )
-        return result.scalar_one()
+        return result.scalar()

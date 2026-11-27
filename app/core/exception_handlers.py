@@ -8,6 +8,7 @@ from app.core.exceptions import (
     AuthenticationError,
     AuthorizationError,
     CredentialError,
+    EmployeePayExistsError,
     EntityExistsError,
     ErrorCode,
     GoogleSignInError,
@@ -177,6 +178,20 @@ class ExceptionHandler:
                     "message": "{reason}",
                 },
                 status_code=400,
+            ),
+        )
+
+        self._app.add_exception_handler(
+            exc_class_or_status_code=EmployeePayExistsError,
+            handler=create_exception_handler(
+                detail={
+                    "status": "error",
+                    "message": (
+                        "Only one pay record can exist for an employee with the "
+                        "same effective_from date."
+                    ),
+                },
+                status_code=409,
             ),
         )
 
