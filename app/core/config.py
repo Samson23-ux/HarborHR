@@ -1,3 +1,4 @@
+from decimal import ROUND_HALF_EVEN
 from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -79,6 +80,10 @@ class Settings(BaseSettings):
     # rate limit keys
     READ_LIMIT_KEY: str = "limiter:read"
     WRITE_LIMIT_KEY: str = "limiter:write"
+
+    # payroll run
+    ROUNDING: str = ROUND_HALF_EVEN
+    ROUNDING_PLACES: str = "0.01"
 
 
 @lru_cache(maxsize=1)
