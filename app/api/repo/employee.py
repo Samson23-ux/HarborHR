@@ -1,5 +1,3 @@
-from datetime import datetime
-
 from sqlalchemy import or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import selectinload
@@ -12,6 +10,7 @@ from app.api.schemas.employee import (
     EmployeeListQuery,
     EmployeeSearchQuery,
 )
+from app.utils import is_valid_datetime
 
 
 class EmployeeRepository(BaseRepository[EmployeeBase, Employee]):
@@ -62,10 +61,7 @@ class EmployeeRepository(BaseRepository[EmployeeBase, Employee]):
         is_valid = True
 
         if isinstance(val, str) and val.endswith("+00:00"):
-            try:
-                val = datetime.fromisoformat(val)
-            except ValueError, TypeError:
-                is_valid = False
+            val = is_valid_datetime(val)
 
         return is_valid, val
 

@@ -1,4 +1,3 @@
-from datetime import datetime
 from typing import Any
 
 from sqlalchemy import select, text
@@ -9,6 +8,7 @@ from app.api.models.invite import Invite
 from app.api.repo.base import BaseRepository
 from app.api.schemas.invite import InviteInDb, InviteListQuery
 from app.core.enum import InviteStatus
+from app.utils import is_valid_datetime
 
 
 class InviteRepository(BaseRepository[InviteInDb, Invite]):
@@ -58,10 +58,7 @@ class InviteRepository(BaseRepository[InviteInDb, Invite]):
         is_valid = True
 
         if isinstance(val, str) and val.endswith("+00:00"):
-            try:
-                val = datetime.fromisoformat(val)
-            except ValueError, TypeError:
-                is_valid = False
+            val = is_valid_datetime(val)
 
         return is_valid, val
 
