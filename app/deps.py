@@ -15,6 +15,7 @@ from app.api.repo.invite import InviteRepository
 from app.api.repo.organization import OrganizationRepository
 from app.api.repo.redis import RedisRepository
 from app.api.repo.role import RoleRepository
+from app.api.repo.statutory_rules import StatutoryRuleRepository
 from app.api.repo.uow import UnitOfWorkRepository
 from app.api.repo.user import UserRepository
 from app.api.schemas.user import CachedUser
@@ -27,6 +28,7 @@ from app.api.services.invite import InviteService
 from app.api.services.organization import OrganizationService
 from app.api.services.otp import OtpService
 from app.api.services.role import RoleService
+from app.api.services.statutory_rules import StatutoryRuleService
 from app.api.services.user import UserService
 from app.core.config import get_settings
 from app.core.enum import Role
@@ -107,6 +109,10 @@ async def get_role_repo(session: DBSession) -> RoleRepository:
     return RoleRepository(async_session=session)
 
 
+async def get_statutory_rule_repo(session: DBSession) -> StatutoryRuleRepository:
+    return StatutoryRuleRepository(async_session=session)
+
+
 async def get_unit_of_work(session: DBSession) -> UnitOfWorkRepository:
     return UnitOfWorkRepository(async_session=session)
 
@@ -122,6 +128,9 @@ EmployeePayRepo = Annotated[EmployeePayRepository, Depends(get_employee_pay_repo
 OrganizationRepo = Annotated[OrganizationRepository, Depends(get_organization_repo)]
 InviteRepo = Annotated[InviteRepository, Depends(get_invite_repo)]
 RoleRepo = Annotated[RoleRepository, Depends(get_role_repo)]
+StatutoryRuleRepo = Annotated[
+    StatutoryRuleRepository, Depends(get_statutory_rule_repo)
+]
 UnitOfWorkRepo = Annotated[UnitOfWorkRepository, Depends(get_unit_of_work)]
 
 #  -------------------- Service dependency ---------------------------- #
@@ -163,6 +172,12 @@ async def get_role_service(role_repo: RoleRepo) -> RoleService:
     return RoleService(role_repo=role_repo)
 
 
+async def get_statutory_rule_service(
+    statutory_rule_repo: StatutoryRuleRepo,
+) -> StatutoryRuleService:
+    return StatutoryRuleService(statutory_rule_repo=statutory_rule_repo)
+
+
 async def get_invite_service(
     security: SecurityDep, invite_repo: InviteRepo, redis_repo: RedisRepo
 ) -> InviteService:
@@ -192,6 +207,9 @@ OrganizationServiceDep = Annotated[
     OrganizationService, Depends(get_organization_service)
 ]
 RoleServiceDep = Annotated[RoleService, Depends(get_role_service)]
+StatutoryRuleServiceDep = Annotated[
+    StatutoryRuleService, Depends(get_statutory_rule_service)
+]
 InviteServiceDep = Annotated[InviteService, Depends(get_invite_service)]
 
 # ------------------------ Auth dependency ---------------------------- #

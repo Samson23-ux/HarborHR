@@ -10,7 +10,8 @@ from app.core.enum import ErrorCode
 
 EXISTS_CODE = {
     "user": ErrorCode.USER_EXISTS,
-    "employee": ErrorCode.EMPLOYEE_EXISTS
+    "employee": ErrorCode.EMPLOYEE_EXISTS,
+    "statutory rule": ErrorCode.STATUTORY_RULE_EXISTS,
 }
 
 

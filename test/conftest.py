@@ -27,6 +27,7 @@ from app.api.models.employee import Employee, EmployeePay, EmploymentPeriod
 from app.api.models.invite import Invite
 from app.api.models.organization import Organization
 from app.api.models.role import Role as DbRole
+from app.api.models.statutory_rules import StatutoryRule
 from app.api.models.user import User
 from app.api.schemas.user import UserInDB
 from app.core.config import get_settings
@@ -434,6 +435,33 @@ async def add_pay_to_db(
         await session.commit()
 
     return pay
+
+
+async def add_statutory_rule_to_db(
+    session_maker: async_sessionmaker,
+    created_by,
+    effective_from,
+    version: int = 1,
+    **overrides,
+) -> dict:
+    rule = {
+        "id": uuid7(),
+        "relief": "200000.00",
+        "relief_percentage": "0.2",
+        "employee_pension_rate": "8.0",
+        "employer_pension_rate": "10.0",
+        "tax_bands": {"bands": []},
+        "version": version,
+        "effective_from": effective_from,
+        "created_by": created_by,
+    }
+    rule.update(overrides)
+
+    async with session_maker() as session:
+        session.add(StatutoryRule(**rule))
+        await session.commit()
+
+    return rule
 
 
 def hash_invite_token(token: str) -> str:
